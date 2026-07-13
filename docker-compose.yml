@@ -1,0 +1,36 @@
+version: "3.8"
+services:
+  gateway:
+    build: .
+    container_name: gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./provider.yaml:/app/provider.yaml:ro
+      - gateway_data:/data
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - KIMI_API_KEY=${KIMI_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gateway_data:

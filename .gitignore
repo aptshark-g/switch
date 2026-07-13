@@ -1,0 +1,34 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go module cache
+.gocache/
+.gomodcache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+cache/
+
+# Environment
+.env
+*.env
+
+# Sensitive configs
+provider.yaml
+gateway.state.json
+gateway_test.log
