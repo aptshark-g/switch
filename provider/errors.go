@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -217,4 +218,50 @@ func Retry(fn func() error, classify func(error) *GatewayError, cfg RetryConfig)
 	}
 	return fmt.Errorf("retry exhausted after %d attempts: %w", cfg.MaxRetries+1, lastErr)
 }
+
+// ── Retry budget: per-provider per-minute retry quota ──
+
+// RetryBudget caps retry attempts to avoid retry storms.
+type RetryBudget struct {
+	mu         sync.Mutex
+	maxPerMin  int
+	bucket     float64
+	lastFill   time.Time
+}
+
+// NewRetryBudget creates a budget with max retries per minute (0=unlimited).
+func NewRetryBudget(maxPerMin int) *RetryBudget {
+	return &RetryBudget{
+		maxPerMin: maxPerMin,
+		bucket:    float64(maxPerMin),
+		lastFill:  time.Now(),
+	}
+}
+
+// TryConsume attempts to consume one retry token. Returns false if budget exhausted.
+func (rb *RetryBudget) TryConsume() bool {
+	if rb.maxPerMin <= 0 { return true }
+	rb.mu.Lock(); defer rb.mu.Unlock()
+	rb.refill()
+	if rb.bucket < 1 { return false }
+	rb.bucket--
+	return true
+}
+
+func (rb *RetryBudget) refill() {
+	elapsed := time.Since(rb.lastFill).Minutes()
+	if elapsed <= 0 { return }
+	rb.lastFill = time.Now()
+	rb.bucket += elapsed * float64(rb.maxPerMin)
+	if rb.bucket > float64(rb.maxPerMin) {
+		rb.bucket = float64(rb.maxPerMin)
+	}
+}
+
+// RetryStats tracks retry metrics.
+type RetryStats struct {
+	Retries       int64
+	BudgetExhausted int64
+}
+
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Manager struct {
@@ -117,7 +118,7 @@ func (m *Manager) Generate(ctx context.Context, name string, req *GenerateReques
 	m.mu.RUnlock()
 	if sem != nil { if err := sem.Acquire(ctx); err != nil { return nil, err }; defer sem.Release() }
 	if rl != nil { if !rl.Allow(tokenEstimate(req)) { return nil, fmt.Errorf("rate limit exceeded for %s", name) } }
-	if cb != nil { if !cb.Allow() { return nil, fmt.Errorf("circuit open for %s", name) }; resp, err := p.Generate(ctx, req); cb.Record(err); return resp, err }
+	if cb != nil { if !cb.Allow() { return nil, fmt.Errorf("circuit open for %s", name) }; t0 := time.Now(); resp, err := p.Generate(ctx, req); cb.Record(err, time.Since(t0)); return resp, err }
 	return p.Generate(ctx, req)
 }
 
