@@ -41,9 +41,11 @@ type ProviderConfig struct {
 	Backend      ProviderBackend   `yaml:"backend,omitempty" json:"backend,omitempty"`
 	ModelAliases map[string]string `yaml:"model_aliases,omitempty" json:"model_aliases,omitempty"`
 	// P1: Production hardening
-	MaxConcurrency int `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
-	RateLimitRPM   int `yaml:"rate_limit_rpm,omitempty" json:"rate_limit_rpm,omitempty"`
-	RateLimitTPM   int `yaml:"rate_limit_tpm,omitempty" json:"rate_limit_tpm,omitempty"`
+	MaxConcurrency      int  `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
+	AdaptiveConcurrency bool `yaml:"adaptive_concurrency,omitempty" json:"adaptive_concurrency,omitempty"`
+	RateLimitRPM        int  `yaml:"rate_limit_rpm,omitempty" json:"rate_limit_rpm,omitempty"`
+	RateLimitTPM        int  `yaml:"rate_limit_tpm,omitempty" json:"rate_limit_tpm,omitempty"`
+	RetryBudget         int  `yaml:"retry_budget,omitempty" json:"retry_budget,omitempty"`
 }
 
 func (c *ProviderConfig) ResolveModel(requested string) string {

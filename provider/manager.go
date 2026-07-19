@@ -10,13 +10,15 @@ import (
 )
 
 type Manager struct {
-	mu           sync.RWMutex
-	providers    map[string]Provider
-	circuits     map[string]*CircuitBreaker
-	factories    map[string]Factory
-	semaphores   map[string]*Semaphore
-	ratelimiters map[string]*ProviderRateLimiter
-	allConfigs   map[string]ProviderConfig
+	mu              sync.RWMutex
+	providers       map[string]Provider
+	circuits        map[string]*CircuitBreaker
+	factories       map[string]Factory
+	semaphores      map[string]*Semaphore
+	adaptiveSems    map[string]*AdaptiveSemaphore
+	ratelimiters    map[string]*ProviderRateLimiter
+	retryBudgets    map[string]*RetryBudget
+	allConfigs      map[string]ProviderConfig
 }
 
 type Factory func(cfg ProviderConfig) (Provider, error)
@@ -27,7 +29,9 @@ func NewManager() *Manager {
 		circuits:     make(map[string]*CircuitBreaker),
 		factories:    make(map[string]Factory),
 		semaphores:   make(map[string]*Semaphore),
+		adaptiveSems: make(map[string]*AdaptiveSemaphore),
 		ratelimiters: make(map[string]*ProviderRateLimiter),
+		retryBudgets: make(map[string]*RetryBudget),
 		allConfigs:   make(map[string]ProviderConfig),
 	}
 }
@@ -73,7 +77,14 @@ func (m *Manager) Register(cfg ProviderConfig) (Provider, error) {
 	m.providers[cfg.Name] = p
 	m.circuits[cfg.Name] = NewCircuitBreaker(cfg.Name)
 	m.semaphores[cfg.Name] = NewSemaphore(cfg.MaxConcurrency)
+	if cfg.AdaptiveConcurrency {
+		acfg := DefaultAdaptiveConfig()
+		acfg.MaxConcurrency = cfg.MaxConcurrency
+		if acfg.MaxConcurrency <= 0 { acfg.MaxConcurrency = 100 }
+		m.adaptiveSems[cfg.Name] = NewAdaptiveSemaphore(acfg)
+	}
 	m.ratelimiters[cfg.Name] = NewProviderRateLimiter(cfg.RateLimitRPM, cfg.RateLimitTPM)
+	m.retryBudgets[cfg.Name] = NewRetryBudget(cfg.RetryBudget)
 	log.Printf("manager: registered provider %q (kind=%s)", cfg.Name, cfg.Kind)
 	return p, nil
 }
