@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/aptshark/gateway/provider"
@@ -99,6 +100,44 @@ func (s *Server) handleAdminEditProvider(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	log.Printf("admin: edited provider %q (kind=%s)", name, cfg.Kind)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "edited", "provider": name})
+	// Persist to provider.yaml so key survives restart
+	s.persistProviderToYAML(cfg)
+	log.Printf("admin: edited provider %q (kind=%s) — persisted to YAML", name, cfg.Kind)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "edited", "provider": name, "persisted": true})
+}
+
+// persistProviderToYAML updates the api_key in provider.yaml for a given provider.
+func (s *Server) persistProviderToYAML(cfg provider.ProviderConfig) {
+	configPath := "provider.yaml" // default; could be made configurable
+	data, err := os.ReadFile(configPath)
+	if err != nil { log.Printf("persist: read YAML: %v", err); return }
+
+	lines := strings.Split(string(data), "\n")
+	inTarget := false
+	found := false
+	for i, line := range lines {
+		if strings.Contains(line, "name: "+cfg.Name) || strings.Contains(line, "name: \""+cfg.Name+"\"") {
+			inTarget = true
+			continue
+		}
+		if inTarget && strings.Contains(line, "api_key:") {
+			lines[i] = "    api_key: " + cfg.APIKey
+			found = true
+			inTarget = false
+			break
+		}
+		if inTarget && (strings.HasPrefix(line, "  - name:") || i == len(lines)-1) {
+			inTarget = false
+		}
+	}
+
+	if found {
+		// Backup
+		backupPath := configPath + ".bak"
+		os.WriteFile(backupPath, data, 0644)
+		os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
+		log.Printf("persist: wrote api_key for %s to %s", cfg.Name, configPath)
+	} else {
+		log.Printf("persist: provider %s not found in %s", cfg.Name, configPath)
+	}
 }
