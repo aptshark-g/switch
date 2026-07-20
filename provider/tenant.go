@@ -2,7 +2,10 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -219,11 +222,54 @@ func (p *Pricing) EstimateCost(promptTokens, compTokens int64) float64 {
 		float64(compTokens)/1_000_000*p.OutputPrice
 }
 
-// SyncFromLitellm fetches pricing from litellm GitHub (placeholder).
-func (ps *PricingStore) SyncFromLitellm() (int, error) {
-	// Placeholder: in production, fetch from:
-	// https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-	return 0, nil
+// SyncFromLitellm fetches model pricing from litellm's community-maintained JSON.
+// Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+func (ps *PricingStore) SyncFromLitellm() (int, string, error) {
+	url := "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, "", fmt.Errorf("litellm fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return 0, "", fmt.Errorf("litellm parse: %w", err)
+	}
+
+	count := 0
+	for model, data := range raw {
+		entry, ok := data.(map[string]any)
+		if !ok { continue }
+		// litellm fields: input_cost_per_token, output_cost_per_token
+		// Convert from per-token to per-1M-tokens
+		inputPrice := 0.0
+		outputPrice := 0.0
+		if v, ok := entry["input_cost_per_token"].(float64); ok {
+			inputPrice = v * 1_000_000
+		}
+		if v, ok := entry["output_cost_per_token"].(float64); ok {
+			outputPrice = v * 1_000_000
+		}
+
+		provider := ""
+		if v, ok := entry["litellm_provider"].(string); ok { provider = v }
+		if provider == "" {
+			if v, ok := entry["provider"].(string); ok { provider = v }
+		}
+
+		ps.Set(model, &Pricing{
+			Model:       model,
+			Provider:    provider,
+			InputPrice:  inputPrice,
+			OutputPrice: outputPrice,
+			Source:      "litellm",
+		})
+		count++
+	}
+
+	return count, url, nil
 }
 
 
