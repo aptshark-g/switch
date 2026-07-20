@@ -168,13 +168,7 @@ sequenceDiagram
         PYGW-->>UI: 更新仪表盘
     end
 
-    UI->>UI: 显示:
-      ├─ 请求量: 142/min
-      ├─ Token: 450K (累计)
-      ├─ P50延迟: 3.2s
-      ├─ 缓存命中率: 23%
-      ├─ 断路器: deepseek closed, lmstudio closed
-      └─ 成本: $0.10 (本月)
+    note over UI: 面板展示数据<br/>请求量: 142/min<br/>Token: 450K (累计)<br/>P50延迟: 3.2s<br/>缓存命中率: 23%<br/>断路器: deepseek closed, lmstudio closed<br/>成本: $0.10 (本月)
 ```
 
 ### 4.2 用量 & 成本
@@ -226,10 +220,8 @@ sequenceDiagram
     
     SW->>SLO: RecordSuccess/RecordFailure (每次请求)
 
-    SLO->>SLO: 滑动窗口计算:
-      short(1h): error_rate=2.1%
-      long(6h):  error_rate=1.8%
-      burn_rate = 2.1%/0.5% = 4.2x
+    SLO->>SLO: 滑动窗口指标计算
+    note over SLO: short(1h): error_rate=2.1%<br/>long(6h): error_rate=1.8%<br/>burn_rate = 2.1%/0.5% = 4.2x
 
     alt burn_rate > 14.4x (page)
         SLO->>ALERT: PAGE: DeepSeek 错误率飙升

@@ -112,7 +112,11 @@ func (m *Manager) List() []ProviderSnapshot {
 		_, active := m.providers[name]
 		hasKey := isKeyConfigured(cfg)
 		active = active && hasKey
-		s := ProviderSnapshot{Name: name, Kind: cfg.Kind, Active: active, Models: cfg.Models, KeyConfigured: isKeyConfigured(cfg)}
+		s := ProviderSnapshot{
+			Name: name, Kind: cfg.Kind, BaseURL: cfg.BaseURL,
+			Active: active, Models: cfg.Models,
+			KeyConfigured: isKeyConfigured(cfg),
+		}
 		if cb, ok := m.circuits[name]; ok { s.Circuit = cb.State() }
 		out = append(out, s)
 	}

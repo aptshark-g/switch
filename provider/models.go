@@ -94,6 +94,7 @@ const (
 type ProviderSnapshot struct {
 	Name      string       `json:"name"`
 	Kind      string       `json:"kind"`
+	BaseURL   string       `json:"base_url,omitempty"`
 	Active    bool         `json:"active"`
 	Models    []string     `json:"models"`
 	Healthy   bool         `json:"healthy"`
