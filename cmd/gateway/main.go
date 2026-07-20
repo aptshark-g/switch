@@ -70,19 +70,8 @@ func main() {
 	}
 	srv := server.NewWithWatcher(mgr, serverAddr, watcher, cfg.Auth, store)
 
-	// Startup diagnostics
+	// Startup diagnostics (LogStartupConfig only — selftest is opt-in via flag)
 	srv.LogStartupConfig()
-	go func() {
-		time.Sleep(2 * time.Second) // wait for server to start
-		results := srv.SelfTest()
-		okCount := 0
-		for _, r := range results {
-			if r.ConnectivityOK != nil && *r.ConnectivityOK {
-				okCount++
-			}
-		}
-		log.Printf("selftest: %d/%d providers reachable", okCount, len(results))
-	}()
 
 	if cfg.Server.TLSCert != "" && cfg.Server.TLSKey != "" {
 		log.Printf("gateway: TLS enabled (cert=%s)", cfg.Server.TLSCert)
