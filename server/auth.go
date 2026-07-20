@@ -22,7 +22,9 @@ func AuthMiddleware(cfg config.AuthConfig) func(http.Handler) http.Handler {
 			// Health endpoints are always public.
 			if strings.HasPrefix(r.URL.Path, "/v1/health") ||
 				strings.HasPrefix(r.URL.Path, "/v1/metrics") ||
-				strings.HasPrefix(r.URL.Path, "/v1/stats") {
+				strings.HasPrefix(r.URL.Path, "/v1/stats") ||
+				strings.HasPrefix(r.URL.Path, "/v1/providers") ||
+				strings.HasPrefix(r.URL.Path, "/v1/diagnostics") {
 				next.ServeHTTP(w, r)
 				return
 			}

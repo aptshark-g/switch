@@ -67,10 +67,12 @@ func (s *Server) BuildHandler() http.Handler {
 	return LoadSheddingMiddleware(s.shedder)(
 		observability.TracingMiddleware(
 			observability.MetricsMiddleware(s.metrics, s.logger)(
-				panicRecoveryMiddleware(
-					LoggingMiddleware(
-						AuthMiddleware(s.authCfg)(
-							RateLimitMiddleware(s.limiter, DefaultKeyFunc)(s.mux),
+				CORSMiddleware(
+					panicRecoveryMiddleware(
+						LoggingMiddleware(
+							AuthMiddleware(s.authCfg)(
+								RateLimitMiddleware(s.limiter, DefaultKeyFunc)(s.mux),
+							),
 						),
 					),
 				),
