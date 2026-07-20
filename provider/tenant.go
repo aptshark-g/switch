@@ -1,0 +1,386 @@
+package provider
+
+import (
+	"context"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ── Multi-tenant: per-API-key quotas with soft-limit warning ──
+
+type TenantConfig struct {
+	Key           string   `json:"key"`
+	Label         string   `json:"label,omitempty"`
+	AllowedModels []string `json:"allowed_models,omitempty"` // empty = all
+	MonthlyTokens int64    `json:"monthly_tokens"`           // 0 = unlimited
+	CostLimit     float64  `json:"cost_limit"`               // 0 = unlimited
+	SoftLimitPct  float64  `json:"soft_limit_pct,omitempty"` // warn when N% used, default 0.8
+	Enabled       bool     `json:"enabled"`
+	CreatedAt     int64    `json:"created_at"`
+}
+
+// TenantStatus wraps config + current usage for API responses.
+type TenantStatus struct {
+	Config        TenantConfig `json:"config"`
+	Usage         TenantUsage  `json:"usage"`
+	Warnings      []string     `json:"warnings,omitempty"`
+	OverQuota     bool         `json:"over_quota"`
+	OverQuotaReason string     `json:"over_quota_reason,omitempty"`
+}
+
+// OnOverQuota is called when a tenant exceeds their quota.
+type OnOverQuota func(key, reason string)
+
+type TenantManager struct {
+	mu           sync.RWMutex
+	tenants      map[string]*TenantConfig
+	usage        map[string]*TenantUsage
+	onOverQuota  OnOverQuota
+	lastReset    time.Time
+}
+
+func NewTenantManager(onOverQuota OnOverQuota) *TenantManager {
+	return &TenantManager{
+		tenants:     make(map[string]*TenantConfig),
+		usage:       make(map[string]*TenantUsage),
+		onOverQuota: onOverQuota,
+		lastReset:   time.Now().UTC(),
+	}
+}
+
+func (tm *TenantManager) Register(cfg TenantConfig) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if cfg.SoftLimitPct == 0 { cfg.SoftLimitPct = 0.8 }
+	if cfg.CreatedAt == 0 { cfg.CreatedAt = time.Now().Unix() }
+	tm.tenants[cfg.Key] = &cfg
+	if _, exists := tm.usage[cfg.Key]; !exists {
+		tm.usage[cfg.Key] = &TenantUsage{}
+	}
+}
+
+func (tm *TenantManager) Revoke(key string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if t, ok := tm.tenants[key]; ok { t.Enabled = false }
+}
+
+func (tm *TenantManager) Check(key, model string, promptTokens, compTokens int64,
+	pricing *Pricing) *TenantStatus {
+	tm.mu.RLock()
+	t, ok := tm.tenants[key]
+	u := tm.usage[key]
+	tm.mu.RUnlock()
+
+	if !ok || t == nil || !t.Enabled {
+		return &TenantStatus{OverQuota: true, OverQuotaReason: "unknown or disabled key"}
+	}
+
+	tm.tryMonthlyReset()
+
+	status := &TenantStatus{Config: *t}
+	if u != nil { status.Usage = *u }
+
+	// Model whitelist
+	if len(t.AllowedModels) > 0 {
+		allowed := false
+		for _, m := range t.AllowedModels {
+			if m == model { allowed = true; break }
+		}
+		if !allowed {
+			status.OverQuota = true
+			status.OverQuotaReason = "model not in allowed list"
+			return status
+		}
+	}
+
+	// Token quota
+	if t.MonthlyTokens > 0 && u != nil {
+		projected := u.PromptTokens + promptTokens + u.CompletionTokens + compTokens
+		if projected > t.MonthlyTokens {
+			status.OverQuota = true
+			status.OverQuotaReason = "monthly token quota exceeded"
+			if tm.onOverQuota != nil { tm.onOverQuota(key, status.OverQuotaReason) }
+			return status
+		}
+		// Soft limit warning
+		if float64(projected)/float64(t.MonthlyTokens) > t.SoftLimitPct {
+			status.Warnings = append(status.Warnings, 
+				"approaching token quota limit")
+		}
+	}
+
+	// Cost quota
+	if t.CostLimit > 0 && u != nil && pricing != nil {
+		estCost := pricing.EstimateCost(promptTokens, compTokens)
+		projectedCost := u.CostUSD + estCost
+		if projectedCost > t.CostLimit {
+			status.OverQuota = true
+			status.OverQuotaReason = "cost limit exceeded"
+			if tm.onOverQuota != nil { tm.onOverQuota(key, status.OverQuotaReason) }
+			return status
+		}
+		if projectedCost/t.CostLimit > t.SoftLimitPct {
+			status.Warnings = append(status.Warnings, "approaching cost limit")
+		}
+	}
+
+	return status
+}
+
+func (tm *TenantManager) Record(key string, promptTokens, compTokens int64, cost float64) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	u, ok := tm.usage[key]
+	if !ok { u = &TenantUsage{}; tm.usage[key] = u }
+	atomic.AddInt64(&u.PromptTokens, promptTokens)
+	atomic.AddInt64(&u.CompletionTokens, compTokens)
+	u.CostUSD += cost
+	u.LastRequest = time.Now()
+}
+
+func (tm *TenantManager) tryMonthlyReset() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	now := time.Now().UTC()
+	if now.Month() != tm.lastReset.Month() || now.Year() != tm.lastReset.Year() {
+		for k := range tm.usage {
+			tm.usage[k] = &TenantUsage{}
+		}
+		tm.lastReset = now
+	}
+}
+
+func (tm *TenantManager) List() []TenantStatus {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	out := make([]TenantStatus, 0, len(tm.tenants))
+	for key, t := range tm.tenants {
+		u := tm.usage[key]
+		s := TenantStatus{Config: *t}
+		if u != nil { s.Usage = *u }
+		out = append(out, s)
+	}
+	return out
+}
+
+
+// ── Pricing: litellm-compatible model pricing ──
+
+type Pricing struct {
+	Model       string  `json:"model"`
+	Provider    string  `json:"provider"`
+	InputPrice  float64 `json:"input_price"`   // per 1M tokens
+	OutputPrice float64 `json:"output_price"`  // per 1M tokens
+	Source      string  `json:"source"`        // "litellm" | "effective" | "manual"
+	UpdatedAt   int64   `json:"updated_at"`
+}
+
+type PricingStore struct {
+	mu       sync.RWMutex
+	prices   map[string]*Pricing // model → pricing
+	fallback map[string]*Pricing // backup source
+}
+
+func NewPricingStore() *PricingStore {
+	return &PricingStore{
+		prices:   make(map[string]*Pricing),
+		fallback: make(map[string]*Pricing),
+	}
+}
+
+func (ps *PricingStore) Set(model string, p *Pricing) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	p.UpdatedAt = time.Now().Unix()
+	ps.prices[model] = p
+}
+
+func (ps *PricingStore) Get(model string) *Pricing {
+	ps.mu.RLock()
+	p := ps.prices[model]
+	ps.mu.RUnlock()
+	if p != nil { return p }
+	// Fallback
+	ps.mu.RLock()
+	p = ps.fallback[model]
+	ps.mu.RUnlock()
+	return p
+}
+
+func (ps *PricingStore) EstimateCost(promptTokens, compTokens int64) float64 {
+	return 0.0 // requires model name, use Get().EstimateCost() instead
+}
+
+func (p *Pricing) EstimateCost(promptTokens, compTokens int64) float64 {
+	return float64(promptTokens)/1_000_000*p.InputPrice +
+		float64(compTokens)/1_000_000*p.OutputPrice
+}
+
+// SyncFromLitellm fetches pricing from litellm GitHub (placeholder).
+func (ps *PricingStore) SyncFromLitellm() (int, error) {
+	// Placeholder: in production, fetch from:
+	// https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+	return 0, nil
+}
+
+
+// ── Cost Validator: real-time + periodic checks ──
+
+type CostValidator struct {
+	mu           sync.Mutex
+	totalChecked int64
+	warnings     int64
+	criticals    int64
+	lastHourCost float64
+	currentCost  float64
+}
+
+func (cv *CostValidator) Validate(pricing *Pricing, cost float64, tokens int64) []string {
+	cv.mu.Lock()
+	defer cv.mu.Unlock()
+	cv.totalChecked++
+
+	var alerts []string
+	if pricing == nil {
+		alerts = append(alerts, "CRITICAL: pricing is nil")
+		cv.criticals++
+	}
+	if cost == 0 && tokens > 0 {
+		alerts = append(alerts, "WARNING: cost=0 but tokens>0")
+		cv.warnings++
+	}
+	if cost > 10.0 {
+		alerts = append(alerts, "WARNING: single request cost exceeds $10")
+		cv.warnings++
+	}
+	if pricing != nil && pricing.InputPrice > 500 {
+		alerts = append(alerts, "WARNING: input price > $500/M (possible config error)")
+		cv.warnings++
+	}
+	cv.currentCost += cost
+	return alerts
+}
+
+func (cv *CostValidator) HourlyCheck() []string {
+	cv.mu.Lock()
+	defer cv.mu.Unlock()
+	var alerts []string
+	if cv.lastHourCost > 0 {
+		growth := (cv.currentCost - cv.lastHourCost) / cv.lastHourCost
+		if growth > 0.5 {
+			alerts = append(alerts, "WARNING: cost grew >50% in last hour")
+		}
+	}
+	cv.lastHourCost = cv.currentCost
+	cv.currentCost = 0
+	return alerts
+}
+
+func (cv *CostValidator) Stats() map[string]any {
+	cv.mu.Lock()
+	defer cv.mu.Unlock()
+	return map[string]any{
+		"total_checked": cv.totalChecked,
+		"warnings":      cv.warnings,
+		"criticals":     cv.criticals,
+	}
+}
+
+
+// ── Active Health Probe: background circuit breaker recovery ──
+
+type Prober struct {
+	manager  *Manager
+	interval time.Duration
+	stopCh   chan struct{}
+}
+
+func NewProber(mgr *Manager, interval time.Duration) *Prober {
+	return &Prober{manager: mgr, interval: interval, stopCh: make(chan struct{})}
+}
+
+func (p *Prober) Start() {
+	go func() {
+		ticker := time.NewTicker(p.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.probe()
+			case <-p.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (p *Prober) Stop() { close(p.stopCh) }
+
+func (p *Prober) probe() {
+	providers := p.manager.List()
+	for _, prov := range providers {
+		if prov.Circuit == "open" && prov.KeyConfigured && len(prov.Models) > 0 {
+			pr, err := p.manager.Get(prov.Name)
+			if err != nil { continue }
+			req := &GenerateRequest{
+				Model:     prov.Models[0],
+				Messages:  []Message{{Role: "user", Content: "ping"}},
+				MaxTokens: 1,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, err = pr.Generate(ctx, req)
+			cancel()
+			if err == nil {
+				log.Printf("probe: %s responded, circuit may recover", prov.Name)
+			}
+		}
+	}
+}
+
+// ── Audit Log: Admin operation tracking ──
+
+type AuditEntry struct {
+	TS        int64  `json:"ts"`
+	Action    string `json:"action"`
+	Admin     string `json:"admin"`
+	Target    string `json:"target,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	ClientIP  string `json:"client_ip,omitempty"`
+	Success   bool   `json:"success"`
+}
+
+type AuditLog struct {
+	mu      sync.RWMutex
+	entries []AuditEntry
+	maxSize int
+}
+
+func NewAuditLog(maxSize int) *AuditLog {
+	return &AuditLog{entries: make([]AuditEntry, 0, maxSize), maxSize: maxSize}
+}
+
+func (a *AuditLog) Record(entry AuditEntry) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry.TS = time.Now().Unix()
+	a.entries = append(a.entries, entry)
+	if len(a.entries) > a.maxSize {
+		a.entries = a.entries[len(a.entries)-a.maxSize:]
+	}
+}
+
+func (a *AuditLog) List(limit int) []AuditEntry {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if limit <= 0 || limit > len(a.entries) {
+		limit = len(a.entries)
+	}
+	start := len(a.entries) - limit
+	if start < 0 { start = 0 }
+	result := make([]AuditEntry, limit)
+	copy(result, a.entries[start:])
+	return result
+}
