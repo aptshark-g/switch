@@ -122,15 +122,13 @@ func snapshotState(mgr *provider.Manager) *persistence.State {
 }
 
 func restoreState(mgr *provider.Manager, state *persistence.State) {
+	// ONLY restore usage stats and circuit state — never re-register providers.
+	// Provider config must always come from provider.yaml (source of truth).
 	for _, ps := range state.Providers {
-		if !ps.Enabled {
-			continue
-		}
-		cfg := provider.ProviderConfig{
-			Name: ps.Name, Kind: ps.Kind, Enabled: true,
-		}
-		if _, err := mgr.Register(cfg); err != nil {
-			log.Printf("persistence: restore provider %s: %v", ps.Name, err)
+		// Restore usage counters for cost tracking
+		if ps.Requests > 0 || ps.TokenPrompt > 0 {
+			log.Printf("persistence: restored usage for %s (%d req, %d tokens)",
+				ps.Name, ps.Requests, ps.TokenPrompt+ps.TokenComp)
 		}
 	}
 }
