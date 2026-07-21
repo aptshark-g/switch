@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/aptshark/gateway/provider"
 )
 
@@ -35,7 +37,6 @@ func (s *Server) handleAdminAddProvider(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
 		return
 	}
-	// Normalise kind.
 	kind := strings.ToLower(strings.TrimSpace(cfg.Kind))
 	if kind == "" {
 		kind = "openai_compatible"
@@ -76,18 +77,6 @@ func (s *Server) handleAdminRemoveProvider(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// adminRoutes registers admin management endpoints.
-func (s *Server) adminRoutes() {
-	s.mux.HandleFunc("/v1/admin/providers", s.handleAdminProviders)
-	s.mux.HandleFunc("/v1/admin/providers/", s.handleAdminProviders)
-
-}
-
-
-
-
-
-
 func (s *Server) handleAdminEditProvider(w http.ResponseWriter, r *http.Request, name string) {
 	var cfg provider.ProviderConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
@@ -100,44 +89,72 @@ func (s *Server) handleAdminEditProvider(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	// Persist to provider.yaml so key survives restart
 	s.persistProviderToYAML(cfg)
 	log.Printf("admin: edited provider %q (kind=%s) — persisted to YAML", name, cfg.Kind)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "edited", "provider": name, "persisted": true})
 }
 
-// persistProviderToYAML updates the api_key in provider.yaml for a given provider.
-func (s *Server) persistProviderToYAML(cfg provider.ProviderConfig) {
-	configPath := "provider.yaml" // default; could be made configurable
-	data, err := os.ReadFile(configPath)
-	if err != nil { log.Printf("persist: read YAML: %v", err); return }
+// providerYAMLRoot mirrors the structure of provider.yaml for safe parsing.
+type providerYAMLRoot struct {
+	Providers []providerConfigYAML `yaml:"providers"`
+}
 
-	lines := strings.Split(string(data), "\n")
-	inTarget := false
+type providerConfigYAML struct {
+	Name     string            `yaml:"name"`
+	Kind     string            `yaml:"kind"`
+	BaseURL  string            `yaml:"base_url"`
+	APIKey   string            `yaml:"api_key,omitempty"`
+	Models   []string          `yaml:"models,omitempty,flow"`
+	Enabled  bool              `yaml:"enabled,omitempty"`
+	// Preserve unknown fields by keeping the original node
+	extra map[string]interface{} `yaml:",inline"`
+}
+
+// persistProviderToYAML updates the api_key for a given provider in provider.yaml using proper YAML parsing.
+func (s *Server) persistProviderToYAML(cfg provider.ProviderConfig) {
+	configPath := "provider.yaml"
+
+	// Read and parse
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Printf("persist: read YAML: %v", err)
+		return
+	}
+
+	// Backup original
+	os.WriteFile(configPath+".bak", data, 0644)
+
+	var root providerYAMLRoot
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		log.Printf("persist: parse YAML: %v", err)
+		return
+	}
+
+	// Find and update the provider
 	found := false
-	for i, line := range lines {
-		if strings.Contains(line, "name: "+cfg.Name) || strings.Contains(line, "name: \""+cfg.Name+"\"") {
-			inTarget = true
-			continue
-		}
-		if inTarget && strings.Contains(line, "api_key:") {
-			lines[i] = "    api_key: " + cfg.APIKey
+	for i := range root.Providers {
+		if root.Providers[i].Name == cfg.Name {
+			root.Providers[i].APIKey = cfg.APIKey
 			found = true
-			inTarget = false
 			break
 		}
-		if inTarget && (strings.HasPrefix(line, "  - name:") || i == len(lines)-1) {
-			inTarget = false
-		}
 	}
 
-	if found {
-		// Backup
-		backupPath := configPath + ".bak"
-		os.WriteFile(backupPath, data, 0644)
-		os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
-		log.Printf("persist: wrote api_key for %s to %s", cfg.Name, configPath)
-	} else {
+	if !found {
 		log.Printf("persist: provider %s not found in %s", cfg.Name, configPath)
+		return
 	}
+
+	// Marshal back
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		log.Printf("persist: marshal YAML: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(configPath, out, 0644); err != nil {
+		log.Printf("persist: write YAML: %v", err)
+		return
+	}
+	log.Printf("persist: wrote api_key for %s to %s", cfg.Name, configPath)
 }

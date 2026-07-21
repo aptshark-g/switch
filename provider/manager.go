@@ -114,6 +114,9 @@ func (m *Manager) Get(name string) (Provider, error) {
 	return p, nil
 }
 
+// List returns all configured providers with their current state.
+// Active=true means the provider is enabled AND has a valid API key configured.
+// This is the correct semantic for routing: we only route to ready providers.
 func (m *Manager) List() []ProviderSnapshot {
 	m.mu.RLock(); defer m.mu.RUnlock()
 	out := make([]ProviderSnapshot, 0, len(m.allConfigs))

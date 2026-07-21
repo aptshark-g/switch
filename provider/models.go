@@ -2,15 +2,6 @@
 
 import "time"
 
-type RoutingStrategy string
-
-const (
-	StrategyBalanced    RoutingStrategy = "balanced"
-	StrategyCostFirst   RoutingStrategy = "cost_first"
-	StrategyPerformance RoutingStrategy = "performance"
-	StrategyRoundRobin  RoutingStrategy = "round_robin"
-)
-
 type ProviderBackend string
 
 const (
