@@ -52,6 +52,10 @@ func main() {
 
 	go store.StartAutoSave()
 
+	// Start background health prober (30s interval)
+	prober := provider.NewProber(mgr, 30*time.Second)
+	go prober.Start()
+
 	watcher := config.NewWatcher(*configPath, 5*time.Second)
 	watcher.OnChange(func(events []config.ChangeEvent) {
 		for _, ev := range events {
