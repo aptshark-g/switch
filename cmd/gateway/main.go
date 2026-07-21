@@ -97,14 +97,16 @@ func registerFactories(mgr *provider.Manager) {
 	})
 }
 
+// snapshotState captures current usage stats for persistence (no keys/config).
 func snapshotState(mgr *provider.Manager) *persistence.State {
-	ps := mgr.List()
 	state := &persistence.State{
-		Providers: make([]persistence.ProviderState, 0, len(ps)),
+		Providers: make([]persistence.ProviderState, 0, len(mgr.List())),
 	}
-	for _, p := range ps {
+	for _, p := range mgr.List() {
 		state.Providers = append(state.Providers, persistence.ProviderState{
-			Name: p.Name, Kind: p.Kind, Enabled: true,
+			Name:    p.Name,
+			Kind:    p.Kind,
+			Enabled: p.Active,
 		})
 	}
 	return state

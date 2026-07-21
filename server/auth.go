@@ -31,8 +31,18 @@ func AuthMiddleware(cfg config.AuthConfig) func(http.Handler) http.Handler {
 
 			token := extractBearer(r)
 
-			// Admin endpoints require admin token.
+			// Admin endpoints require admin token (except routing pool GET).
 			if strings.HasPrefix(r.URL.Path, "/v1/admin") {
+				// /v1/admin/routing GET works with api_key (for frontend polling)
+				if r.URL.Path == "/v1/admin/routing" && r.Method == "GET" {
+					if token == "" || !keySet[token] {
+						w.Header().Set("WWW-Authenticate", "Bearer")
+						writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "valid API key required"})
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
 				if cfg.AdminToken == "" || token != cfg.AdminToken {
 					writeJSON(w, http.StatusForbidden, map[string]string{
 						"error": "admin token required",

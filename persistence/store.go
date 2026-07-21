@@ -22,18 +22,16 @@ type State struct {
 	Cache         map[string]CacheEntry        `json:"cache,omitempty"`
 }
 
-// ProviderState is the persisted form of a single provider.
+// ProviderState is the persisted form of a single provider (usage stats only).
+// Config (API keys, base URLs) is NEVER persisted — source of truth is provider.yaml.
 type ProviderState struct {
-	Name         string   `json:"name"`
-	Kind         string   `json:"kind"`
-	BaseURL      string   `json:"base_url"`
-	APIKey       string   `json:"api_key"`
-	Models       []string `json:"models"`
-	Enabled      bool     `json:"enabled"`
-	Requests     int64    `json:"requests"`
-	Errors       int64    `json:"errors"`
-	TokenPrompt  int64    `json:"token_prompt"`
-	TokenComp    int64    `json:"token_completion"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Enabled     bool   `json:"enabled"`
+	Requests    int64  `json:"requests"`
+	Errors      int64  `json:"errors"`
+	TokenPrompt int64  `json:"token_prompt"`
+	TokenComp   int64  `json:"token_completion"`
 }
 
 // UsageState is the persisted usage for a provider.

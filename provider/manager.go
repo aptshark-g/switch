@@ -58,21 +58,30 @@ func (m *Manager) Bootstrap(configs []ProviderConfig) error {
 }
 
 func (m *Manager) Register(cfg ProviderConfig) (Provider, error) {
+	// Quick check under RLock first to avoid unnecessary Lock for existing providers
 	m.mu.RLock()
-	if _, exists := m.providers[cfg.Name]; exists {
+	if p, exists := m.providers[cfg.Name]; exists {
 		m.mu.RUnlock()
+		// Just update config under Lock
 		m.mu.Lock()
 		m.allConfigs[cfg.Name] = cfg
 		m.mu.Unlock()
-		return m.providers[cfg.Name], nil
+		return p, nil
 	}
 	m.mu.RUnlock()
+
+	// New provider — factory call outside lock, then register under full Lock
 	factory, ok := m.factories[cfg.Kind]
 	if !ok { return nil, fmt.Errorf("no factory for kind %q", cfg.Kind) }
 	p, err := factory(cfg)
 	if err != nil { return nil, fmt.Errorf("construct %s: %w", cfg.Kind, err) }
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Double-check: another goroutine may have registered while we built
+	if existing, exists := m.providers[cfg.Name]; exists {
+		log.Printf("manager: %s registered concurrently, reusing", cfg.Name)
+		return existing, nil
+	}
 	m.allConfigs[cfg.Name] = cfg
 	m.providers[cfg.Name] = p
 	m.circuits[cfg.Name] = NewCircuitBreaker(cfg.Name)

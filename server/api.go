@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/aptshark/gateway/cache"
@@ -28,7 +29,9 @@ type Server struct {
 	watcher  *config.Watcher
 	authCfg  config.AuthConfig
 	store    *persistence.Store
-	shedder  *LoadShedder
+	shedder     *LoadShedder
+	routingPool map[string]bool
+	poolMutex   sync.RWMutex
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
