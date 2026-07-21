@@ -63,6 +63,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/admin/reload", s.handleAdminReload)
 	s.mux.HandleFunc("/v1/admin/providers", s.handleAdminProviders)
 	s.mux.HandleFunc("/v1/diagnostics", s.handleDiagnostics)
+	s.mux.HandleFunc("/v1/admin/routing", s.handleRoutingPool)
 	s.mux.HandleFunc("/v1/admin/providers/", s.handleAdminProviders)
 }
 
@@ -190,12 +191,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream { s.metrics.StreamRequests.Inc() } else { s.metrics.NonStreamReqs.Inc() }
 	providerName := r.URL.Query().Get("provider")
 	if providerName == "" {
-		providers := s.manager.List()
-		if len(providers) == 0 {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no providers configured"})
+		providerName = s.getRoutingProvider()
+		if providerName == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no routing provider available — configure keys in Gateway page"})
 			return
 		}
-		providerName = providers[0].Name
 	}
 	if !req.Stream {
 		cacheKey := cache.HashKey(req.Messages[len(req.Messages)-1].Content, req.Model)
@@ -215,8 +215,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		gw := provider.ClassifyError(providerName, err, 0)
 		log.Printf("gateway: generate error [%s] %s: %v", providerName, gw.Kind, err)
 		if gw.Kind.Retryable() {
-			s.gracefulDegradation(w, r, &req)
-			return
+			if s.gracefulDegradation(w, r, &req, providerName) {
+				return
+			}
 		}
 		writeJSON(w, gw.Kind.HTTPStatus(), map[string]string{
 			"error": gw.Message, "kind": gw.Kind.String(), "provider": providerName,
@@ -231,18 +232,36 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req *provider.GenerateRequest) {
-	for _, p := range s.manager.List() {
-		resp, err := s.manager.Generate(r.Context(), p.Name, req)
+func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req *provider.GenerateRequest, exclude string) bool {
+	for _, name := range s.getRoutingCandidates() {
+		if name == exclude { continue }
+		resp, err := s.manager.Generate(r.Context(), name, req)
 		if err == nil {
 			if resp.Usage != nil {
-				s.metrics.RecordTokens(p.Name, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+				s.metrics.RecordTokens(name, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 			}
-			writeJSON(w, http.StatusOK, resp); return
+			log.Printf("gateway: degraded to %s", name)
+			writeJSON(w, http.StatusOK, resp); return true
 		}
-		if !provider.ClassifyError(p.Name, err, 0).Kind.Retryable() { break }
+		if !provider.ClassifyError(name, err, 0).Kind.Retryable() { continue }
 	}
-	writeJSON(w, http.StatusBadGateway, map[string]string{"error": "all providers exhausted"})
+	return false
+}
+
+func (s *Server) getRoutingCandidates() []string {
+	s.poolMutex.RLock(); defer s.poolMutex.RUnlock()
+	seen := map[string]bool{}
+	var res []string
+	for name, in := range s.routingPool {
+		if !in { continue }
+		for _, p := range s.manager.List() {
+			if p.Name == name && p.Active && p.KeyConfigured { seen[name]=true; res=append(res, name); break }
+		}
+	}
+	for _, p := range s.manager.List() {
+		if !seen[p.Name] && p.Active && p.KeyConfigured { res=append(res, p.Name) }
+	}
+	return res
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name string, req *provider.GenerateRequest) {
