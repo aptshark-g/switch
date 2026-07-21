@@ -149,22 +149,17 @@ func isNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	// DNS / connection refused / unreachable / TLS
-	if strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "no such host") ||
-		strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "TLS") ||
-		strings.Contains(msg, "dial tcp") ||
-		strings.Contains(msg, "connectex") {
-		return true
+	msg := strings.ToLower(err.Error())
+	// Connection / DNS / timeout / TLS
+	for _, pattern := range []string{
+		"connection refused", "no such host", "i/o timeout",
+		"tls", "dial tcp", "connectex", "eof", "broken pipe",
+		"connection reset", "use of closed network",
+	} {
+		if strings.Contains(msg, pattern) { return true }
 	}
-	// Also check for net.OpError.
 	var netErr *net.OpError
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &netErr)
 }
 
 // ---------------------------------------------------------------------------

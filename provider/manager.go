@@ -176,10 +176,16 @@ func (m *Manager) Diagnostics() map[string]any {
 	return map[string]any{"providers": providers}
 }
 
+// tokenEstimate estimates token count for rate limiting.
+// Uses ~4 chars/token for English as a reasonable default.
+// For better accuracy, models with different encodings may adjust.
 func tokenEstimate(req *GenerateRequest) int {
 	n := 0
-	for _, msg := range req.Messages { n += len(msg.Content) }
-	return n/4 + req.MaxTokens
+	for _, msg := range req.Messages {
+		n += len(msg.Content)
+	}
+	// ~4 chars per token (English average), plus system overhead
+	return n/4 + len(req.Messages) + req.MaxTokens
 }
 
 type UsageStats struct {
