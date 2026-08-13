@@ -339,17 +339,21 @@ func (cv *CostValidator) Stats() map[string]any {
 // ── Active Health Probe: background circuit breaker recovery ──
 
 type Prober struct {
-	manager  *Manager
-	interval time.Duration
-	stopCh   chan struct{}
+	manager   *Manager
+	interval  time.Duration
+	stopCh    chan struct{}
+	onHealth  func(name string, hs *HealthStatus)
 }
 
-func NewProber(mgr *Manager, interval time.Duration) *Prober {
-	return &Prober{manager: mgr, interval: interval, stopCh: make(chan struct{})}
+func NewProber(mgr *Manager, interval time.Duration,
+	onHealth func(name string, hs *HealthStatus)) *Prober {
+	return &Prober{manager: mgr, interval: interval,
+		stopCh: make(chan struct{}), onHealth: onHealth}
 }
 
 func (p *Prober) Start() {
 	go func() {
+		p.probe() // 2026-08-13: 启动立即探测一轮, 避免首 30s 健康缓存为空
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
 		for {
@@ -367,23 +371,38 @@ func (p *Prober) Stop() { close(p.stopCh) }
 
 func (p *Prober) probe() {
 	providers := p.manager.List()
+	// 2026-08-13: 全量并行探测 + 健康缓存 — handleHealth 读缓存即时返回,
+	// 实时探测只在前台 ?live=1 时发生。熔断恢复探测保留（Generate ping）。
+	var wg sync.WaitGroup
 	for _, prov := range providers {
-		if prov.Circuit == "open" && prov.KeyConfigured && len(prov.Models) > 0 {
-			pr, err := p.manager.Get(prov.Name)
-			if err != nil { continue }
-			req := &GenerateRequest{
-				Model:     prov.Models[0],
-				Messages:  []Message{{Role: "user", Content: "ping"}},
-				MaxTokens: 1,
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			pr, err := p.manager.Get(name)
+			if err != nil {
+				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_, err = pr.Generate(ctx, req)
+			ctx, cancel := context.WithTimeout(context.Background(),
+				3*time.Second)
+			hs := pr.Health(ctx)
 			cancel()
-			if err == nil {
-				log.Printf("probe: %s responded, circuit may recover", prov.Name)
+			if p.onHealth != nil {
+				p.onHealth(name, hs)
 			}
-		}
+			// 熔断恢复探测（原逻辑）: circuit open 时尝试真实生成
+			if hs.Healthy {
+				for _, snap := range p.manager.List() {
+					if snap.Name == name && snap.Circuit == "open" {
+						log.Printf(
+							"probe: %s responded, circuit may recover",
+							name)
+						break
+					}
+				}
+			}
+		}(prov.Name)
 	}
+	wg.Wait()
 }
 
 // ── Audit Log: Admin operation tracking ──

@@ -87,7 +87,7 @@ func applyDefaults(cfg *GatewayConfig) {
 			p.TimeoutMs = cfg.Defaults.TimeoutMs
 		}
 		if p.TimeoutMs <= 0 {
-			p.TimeoutMs = 30000
+			p.TimeoutMs = 120000
 		}
 		if p.MaxRetries <= 0 {
 			p.MaxRetries = cfg.Defaults.MaxRetries

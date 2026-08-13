@@ -70,6 +70,10 @@ type Server struct {
 	shedder     *LoadShedder
 	routingPool map[string]bool
 	poolMutex   sync.RWMutex
+	// 健康缓存（2026-08-13）: 后台 Prober 每 30s 并行探测写入;
+	// /v1/health 读缓存即时返回, ?live=1 才实时探测。
+	healthCache map[string]*provider.HealthStatus
+	healthMu    sync.RWMutex
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -90,9 +94,31 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		authCfg:  authCfg,
 		store:    store,
 		shedder:  NewLoadShedder(5000),
+		healthCache: make(map[string]*provider.HealthStatus),
 	}
 	s.routes()
 	return s
+}
+
+// UpdateHealth stores a probe result for a provider (called by Prober).
+func (s *Server) UpdateHealth(name string, hs *provider.HealthStatus) {
+	if hs == nil {
+		return
+	}
+	s.healthMu.Lock()
+	s.healthCache[name] = hs
+	s.healthMu.Unlock()
+}
+
+// HealthSnapshot returns cached health for all providers (instant).
+func (s *Server) HealthSnapshot() map[string]*provider.HealthStatus {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	out := make(map[string]*provider.HealthStatus, len(s.healthCache))
+	for k, v := range s.healthCache {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Server) routes() {
@@ -146,6 +172,28 @@ func (s *Server) onShutdown() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	providers := s.manager.List()
+	// 2026-08-13: 默认读后台 Prober 缓存（30s 新鲜度, 即时返回）;
+	// ?live=1 才实时并行探测（调试/冷启动首查用）。
+	if r.URL.Query().Get("live") != "1" {
+		snap := s.HealthSnapshot()
+		healthyCount := 0
+		for _, p := range providers {
+			if hs, ok := snap[p.Name]; ok && hs.Healthy {
+				healthyCount++
+			}
+		}
+		status := "ok"
+		code := http.StatusOK
+		if healthyCount == 0 && len(providers) > 0 {
+			status = "degraded"
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, map[string]any{
+			"status": status, "providers_healthy": healthyCount,
+			"providers_total": len(providers), "cached": true,
+		})
+		return
+	}
 	healthyCount := 0
 	// 并行探测（2026-08-12）: 此前串行逐个 Health()（每个 3s 超时 +
 	// 真实网络往返）→ 9 provider 时 /v1/health 被拉高到 ~100ms+

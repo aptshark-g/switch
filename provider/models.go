@@ -54,7 +54,10 @@ func (c *ProviderConfig) ResolveModel(requested string) string {
 
 func (c *ProviderConfig) Timeout() time.Duration {
 	if c.TimeoutMs <= 0 {
-		return 30 * time.Second
+		// 2026-08-13: 30s → 120s（LiteLLM 风格生成超时; 长生成 +
+		// 思维链在 30s 内必 504）。连接超时由 transport DialContext
+		// 5s 单独负责（openai.go sharedTransport）。
+		return 120 * time.Second
 	}
 	return time.Duration(c.TimeoutMs) * time.Millisecond
 }

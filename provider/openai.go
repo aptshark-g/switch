@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -51,6 +53,12 @@ func (p *OpenAIProvider) Name() string   { return p.cfg.Name }
 func (p *OpenAIProvider) Config() *ProviderConfig { return &p.cfg }
 
 func (p *OpenAIProvider) Generate(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error) {
+	// one-api 风格（2026-08-13）: 上游恒流式 — 长生成下流式逐块
+	// 送达, 避免非流式整包缓冲 + 固定超时截断; 客户端要非流式时
+	// 网关内聚合。
+	if !req.Stream {
+		return p.generateViaStream(ctx, req)
+	}
 	body, err := p.buildRequestBody(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("openai: marshal request: %w", err)
@@ -71,20 +79,101 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req *GenerateRequest) (*G
 	return p.parseResponse(resp.Body)
 }
 
+// generateViaStream 用流式上游聚合出完整响应（客户端非流式路径）。
+func (p *OpenAIProvider) generateViaStream(ctx context.Context,
+	req *GenerateRequest) (*GenerateResponse, error) {
+	// 2026-08-13 修复: buildRequestBody 的 Stream = stream && req.Stream,
+	// 客户端非流式请求直接传 req 会把上游也变成非流式 → SSE 解析不到
+	// 任何行 → 聚合恒空。内部拷贝并强制 stream=true。
+	streamReq := *req
+	streamReq.Stream = true
+	ch, err := p.GenerateStream(ctx, &streamReq)
+	if err != nil {
+		return nil, err
+	}
+	var content strings.Builder
+	var reasoning strings.Builder
+	var toolCalls []ToolCall
+	var finishReason string
+	var usage *TokenUsage
+	id, model := "", req.Model
+	for chunk := range ch {
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("openai: stream: %w", chunk.Error)
+		}
+		if chunk.ID != "" {
+			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		content.WriteString(chunk.Delta.Content)
+		reasoning.WriteString(chunk.Delta.ReasoningContent)
+		if len(chunk.Delta.ToolCalls) > 0 {
+			toolCalls = append(toolCalls, chunk.Delta.ToolCalls...)
+		}
+		if chunk.FinishReason != "" {
+			finishReason = chunk.FinishReason
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+	}
+	msg := Message{Role: "assistant", Content: content.String(),
+		ToolCalls: toolCalls}
+	// 推理模型: content 空但 reasoning 非空 → 透出（与 parseResponse 同规则）
+	if msg.Content == "" && reasoning.Len() > 0 &&
+		os.Getenv("REASONING_FALLBACK") != "0" {
+		msg.Content = reasoning.String()
+	}
+	return &GenerateResponse{
+		ID:      id,
+		Model:   model,
+		Choices: []Choice{{Index: 0, Message: msg, FinishReason: finishReason}},
+		Usage:   usage,
+	}, nil
+}
+
 func (p *OpenAIProvider) GenerateStream(ctx context.Context, req *GenerateRequest) (<-chan *StreamChunk, error) {
 	body, err := p.buildRequestBody(req, true)
 	if err != nil {
 		return nil, fmt.Errorf("openai: marshal request: %w", err)
 	}
-	httpReq, err := p.newRequest(ctx, body)
-	if err != nil {
-		return nil, err
+	// 2026-08-13: 连接阶段重试（one-api/LiteLLM 风格）— 网络错误/5xx
+	// 在首个 chunk 前重试（max_retries 默认 2, 退避+jitter）; 流开始后
+	// 不重试（避免客户端收到重复片段）。
+	attempts := 1 + max(0, p.cfg.MaxRetries)
+	var resp *http.Response
+	var respErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		httpReq, err := p.newRequest(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Accept", "text/event-stream")
+		if tc := observability.GetTraceContext(ctx); tc != nil {
+			child := tc.NewChildSpan()
+			observability.InjectTraceHeaders(child, httpReq)
+		}
+		resp, respErr = p.client.Do(httpReq)
+		if respErr == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		if attempt+1 < attempts {
+			backoff := time.Duration(300*(1<<attempt)) * time.Millisecond
+			backoff += time.Duration(rand.Intn(150)) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
 	}
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if tc := observability.GetTraceContext(ctx); tc != nil { child := tc.NewChildSpan(); observability.InjectTraceHeaders(child, httpReq) }
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai: http do: %w", err)
+	if respErr != nil {
+		return nil, fmt.Errorf("openai: http do: %w", respErr)
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -311,6 +400,10 @@ var sharedTransport = &http.Transport{
 	IdleConnTimeout:     90 * time.Second,
 	TLSHandshakeTimeout: 10 * time.Second,
 	DisableCompression:  false,
+	// 2026-08-13: 连接超时与响应超时分离 — 死连接 5s 快速失败,
+	// 长生成由 client.Timeout（120s 默认）负责。
+	DialContext: (&net.Dialer{Timeout: 5 * time.Second,
+		KeepAlive: 30 * time.Second}).DialContext,
 }
 
 // Ensure sync import is used.

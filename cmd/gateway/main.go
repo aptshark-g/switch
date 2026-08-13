@@ -52,10 +52,6 @@ func main() {
 
 	go store.StartAutoSave()
 
-	// Start background health prober (30s interval)
-	prober := provider.NewProber(mgr, 30*time.Second)
-	go prober.Start()
-
 	watcher := config.NewWatcher(*configPath, 5*time.Second)
 	watcher.OnChange(func(events []config.ChangeEvent) {
 		for _, ev := range events {
@@ -73,6 +69,11 @@ func main() {
 		serverAddr = fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	}
 	srv := server.NewWithWatcher(mgr, serverAddr, watcher, cfg.Auth, store)
+
+	// Start background health prober (30s interval) — 2026-08-13:
+	// 全量并行探测 + 健康缓存（/v1/health 读缓存即时返回）。
+	prober := provider.NewProber(mgr, 30*time.Second, srv.UpdateHealth)
+	go prober.Start()
 
 	// Startup diagnostics (LogStartupConfig only — selftest is opt-in via flag)
 	srv.LogStartupConfig()
