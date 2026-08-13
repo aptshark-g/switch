@@ -158,3 +158,11 @@ func (s *Server) persistProviderToYAML(cfg provider.ProviderConfig) {
 	}
 	log.Printf("persist: wrote api_key for %s to %s", cfg.Name, configPath)
 }
+
+// handleAdminReload — 配置热重载确认端点（watcher 本就每 5s 自动重载,
+// 此端点用于显式触发/确认, 兼容 gtctl/gtui）。
+func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"note":   "watcher auto-reloads provider.yaml every 5s"})
+}

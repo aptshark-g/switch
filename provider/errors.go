@@ -25,6 +25,10 @@ const (
 	ErrCircuitOpen              // local circuit breaker is open
 	ErrNoProviders              // no providers configured
 	ErrProviderNotFound         // named provider not registered
+	ErrContextWindow            // 400: 上下文超限（LiteLLM ContextWindowExceededError）
+	ErrContentPolicy            // 400/422: 内容策略拒绝（ContentPolicyViolationError）
+	ErrPermission               // 403: 权限不足（PermissionDeniedError）
+	ErrModelNotFound            // 404: 模型不存在（NotFoundError）
 )
 
 // String returns a human-readable name for the error kind.
@@ -48,8 +52,51 @@ func (k ErrorKind) String() string {
 		return "no_providers"
 	case ErrProviderNotFound:
 		return "provider_not_found"
+	case ErrContextWindow:
+		return "context_window_exceeded"
+	case ErrContentPolicy:
+		return "content_policy_violation"
+	case ErrPermission:
+		return "permission_denied"
+	case ErrModelNotFound:
+		return "model_not_found"
 	default:
 		return "unknown"
+	}
+}
+
+// Code returns a stable, catalog-lookupable error code (2026-08-13).
+// 前端/客户端按 code 查表（gateway/error_catalog.yaml）, 不做文本匹配。
+func (k ErrorKind) Code() string {
+	switch k {
+	case ErrAuth:
+		return "AUTH_FAILED"
+	case ErrRateLimit:
+		return "RATE_LIMITED"
+	case ErrTimeout:
+		return "UPSTREAM_TIMEOUT"
+	case ErrServerError:
+		return "UPSTREAM_5XX"
+	case ErrBadRequest:
+		return "BAD_REQUEST"
+	case ErrNetwork:
+		return "NETWORK_ERROR"
+	case ErrCircuitOpen:
+		return "CIRCUIT_OPEN"
+	case ErrNoProviders:
+		return "NO_PROVIDER"
+	case ErrProviderNotFound:
+		return "PROVIDER_NOT_FOUND"
+	case ErrContextWindow:
+		return "CONTEXT_WINDOW_EXCEEDED"
+	case ErrContentPolicy:
+		return "CONTENT_POLICY_VIOLATION"
+	case ErrPermission:
+		return "PERMISSION_DENIED"
+	case ErrModelNotFound:
+		return "MODEL_NOT_FOUND"
+	default:
+		return "UNKNOWN_ERROR"
 	}
 }
 
@@ -80,6 +127,14 @@ func (k ErrorKind) HTTPStatus() int {
 		return http.StatusServiceUnavailable
 	case ErrNoProviders, ErrProviderNotFound:
 		return http.StatusNotFound
+	case ErrContextWindow:
+		return http.StatusRequestEntityTooLarge
+	case ErrContentPolicy:
+		return http.StatusUnprocessableEntity
+	case ErrPermission:
+		return http.StatusForbidden
+	case ErrModelNotFound:
+		return http.StatusNotFound
 	default:
 		return http.StatusInternalServerError
 	}
@@ -102,10 +157,18 @@ func (e *GatewayError) Error() string {
 
 func (e *GatewayError) Unwrap() error { return e.Err }
 
+// Code exposes the stable error code for catalog lookup.
+func (e *GatewayError) Code() string { return e.Kind.Code() }
+
 // ClassifyError inspects an HTTP response or Go error to determine its kind.
 // It is the single source of truth for error taxonomy.
 func ClassifyError(provider string, err error, statusCode int) *GatewayError {
 	gw := &GatewayError{Provider: provider, Err: err}
+	// 已分类错误直接复用（parseError 等上游已带状态码+消息）
+	var existing *GatewayError
+	if errors.As(err, &existing) {
+		return existing
+	}
 
 	if statusCode > 0 {
 		switch {
@@ -143,6 +206,59 @@ func ClassifyError(provider string, err error, statusCode int) *GatewayError {
 		gw.Message = err.Error()
 	}
 	return gw
+}
+
+// ClassifyErrorWithMessage 按 状态码 + 上游错误消息 分类（2026-08-13）。
+// 消息模式对齐 LiteLLM 分类: context window / content policy / model not found。
+func ClassifyErrorWithMessage(provider string, status int,
+	message string) *GatewayError {
+	gw := &GatewayError{Provider: provider, Kind: ErrUnknown,
+		Message: message}
+	low := strings.ToLower(message)
+	switch {
+	case status == http.StatusUnauthorized:
+		gw.Kind, gw.Message = ErrAuth, "authentication failed — check your API key"
+	case status == http.StatusForbidden:
+		gw.Kind, gw.Message = ErrPermission, "permission denied (403)"
+	case status == http.StatusTooManyRequests:
+		gw.Kind, gw.Message = ErrRateLimit,
+			"upstream rate limit exceeded — retry after a delay"
+	case status == http.StatusNotFound:
+		gw.Kind, gw.Message = ErrModelNotFound, "model or endpoint not found (404)"
+	case status == http.StatusRequestEntityTooLarge:
+		gw.Kind, gw.Message = ErrContextWindow, "request too large (413)"
+	case status >= 500:
+		gw.Kind, gw.Message = ErrServerError,
+			fmt.Sprintf("upstream server error (HTTP %d)", status)
+	case status >= 400:
+		gw.Kind, gw.Message = ErrBadRequest,
+			fmt.Sprintf("bad request (HTTP %d)", status)
+	}
+	// 消息模式精化（400 家族内细分, LiteLLM 同款）
+	if status >= 400 && status < 500 {
+		switch {
+		case containsAny(low, "context", "maximum context", "token limit",
+			"input is too long", "length"):
+			gw.Kind, gw.Message = ErrContextWindow,
+				"context window exceeded — 缩短输入或摘要"
+		case containsAny(low, "policy", "content.filtered", "sensitive",
+			"moderation", "safety"):
+			gw.Kind, gw.Message = ErrContentPolicy,
+				"content policy violation (upstream)"
+		case containsAny(low, "model", "not found", "does not exist"):
+			gw.Kind, gw.Message = ErrModelNotFound, "model not found"
+		}
+	}
+	return gw
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func isNetworkError(err error) bool {

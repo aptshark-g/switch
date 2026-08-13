@@ -331,10 +331,12 @@ func (p *OpenAIProvider) parseResponse(r io.Reader) (*GenerateResponse, error) {
 func (p *OpenAIProvider) parseError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var errResp openaiErrorResponse
+	msg := string(body)
 	if json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
-		return fmt.Errorf("openai: %d %s: %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+		msg = errResp.Error.Message
 	}
-	return fmt.Errorf("openai: %d %s", resp.StatusCode, string(body))
+	// 2026-08-13: 带状态码+消息分类（上游 4xx 不再落 UNKNOWN）
+	return ClassifyErrorWithMessage(p.cfg.Name, resp.StatusCode, msg)
 }
 
 // --- SSE streaming ---

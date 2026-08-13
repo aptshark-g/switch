@@ -74,6 +74,9 @@ type Server struct {
 	// /v1/health 读缓存即时返回, ?live=1 才实时探测。
 	healthCache map[string]*provider.HealthStatus
 	healthMu    sync.RWMutex
+	// 计费跟踪（2026-08-13 接线）: CostTracker 此前孤儿 — 生产从不调用。
+	// 成功请求按 provider pricing 计费, /v1/usage 聚合展示。
+	costs *provider.CostTracker
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -95,9 +98,33 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		store:    store,
 		shedder:  NewLoadShedder(5000),
 		healthCache: make(map[string]*provider.HealthStatus),
+		costs: provider.NewCostTracker(func() string {
+			if p := os.Getenv("DM_GATEWAY_USAGE_LOG"); p != "" {
+				return p
+			}
+			return "usage_log.jsonl"
+		}()),
 	}
 	s.routes()
 	return s
+}
+
+// recordUsage 计费接线: usage → CostTracker（按 auth key 聚合）。
+func (s *Server) recordUsage(providerName, model string,
+	usage *provider.TokenUsage, r *http.Request) {
+	if usage == nil || s.costs == nil {
+		return
+	}
+	var pricing *provider.TokenPricing
+	if p, err := s.manager.Get(providerName); err == nil {
+		pricing = p.Config().Pricing
+	}
+	key := "dm-client"
+	if h := r.Header.Get("Authorization"); len(h) > 7 {
+		key = h[7:]
+	}
+	s.costs.Record(key, providerName, model,
+		usage.PromptTokens, usage.CompletionTokens, pricing)
 }
 
 // UpdateHealth stores a probe result for a provider (called by Prober).
@@ -129,6 +156,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("/v1/providers", s.handleListProviders)
 	s.mux.HandleFunc("/v1/usage", s.handleUsage)
+	s.mux.HandleFunc("/v1/error-catalog", s.handleErrorCatalog)
+	s.mux.HandleFunc("/admin", s.handleAdminPage)
 	s.mux.HandleFunc("/v1/admin/reload", s.handleAdminReload)
 	s.mux.HandleFunc("/v1/admin/providers", s.handleAdminProviders)
 	s.mux.HandleFunc("/v1/diagnostics", s.handleDiagnostics)
@@ -262,7 +291,23 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.manager.UsageStats())
+	stats := s.manager.UsageStats()
+	out := map[string]any{
+		"total_requests": stats.TotalRequests,
+		"total_tokens":   stats.TotalTokens,
+		"by_provider":    stats.ByProvider,
+	}
+	// 计费（2026-08-13 接线）: CostTracker 快照并入 /v1/usage
+	if s.costs != nil {
+		cs := s.costs.Snapshot()
+		out["cost"] = map[string]any{
+			"total":        cs.Total,
+			"by_key":       cs.ByKey,
+			"by_model":     cs.ByModel,
+			"tenant_count": cs.TenantCount,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func validateRequest(req *provider.GenerateRequest) error {
@@ -284,11 +329,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	var req provider.GenerateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON body", "code": "BAD_REQUEST"})
 		return
 	}
 	if err := validateRequest(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(), "code": "BAD_REQUEST"})
 		return
 	}
 	s.metrics.IncModel(req.Model)
@@ -297,8 +344,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if providerName == "" {
 		providerName = s.getRoutingProvider()
 		if providerName == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no routing provider available — configure keys in Gateway page"})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "no routing provider available — configure keys in Gateway page",
+				"code":  "NO_PROVIDER"})
 			return
+		}
+	}
+	// per-key 日配额（2026-08-13）: DM_GATEWAY_KEY_QUOTA_DAILY（token/天,
+	// 0=不限）。按 auth key 当日已用 token 判定, 超限 429 + BUDGET_EXCEEDED。
+	if q := os.Getenv("DM_GATEWAY_KEY_QUOTA_DAILY"); q != "" &&
+		s.costs != nil {
+		var qn int64
+		if n, _ := fmt.Sscanf(q, "%d", &qn); n == 1 && qn > 0 {
+			key := "dm-client"
+			if h := r.Header.Get("Authorization"); len(h) > 7 {
+				key = h[7:]
+			}
+			if s.costs.DailyTokens(key) >= qn {
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"error":    "daily token quota exceeded",
+					"code":     "BUDGET_EXCEEDED",
+					"provider": providerName})
+				return
+			}
 		}
 	}
 	if !req.Stream {
@@ -324,12 +392,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, gw.Kind.HTTPStatus(), map[string]string{
-			"error": gw.Message, "kind": gw.Kind.String(), "provider": providerName,
+			"error": gw.Message, "kind": gw.Kind.String(),
+			"code":  gw.Code(), "provider": providerName,
 		})
 		return
 	}
 	if resp.Usage != nil {
 		s.metrics.RecordTokens(providerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		s.recordUsage(providerName, req.Model, resp.Usage, r)
 	}
 	cacheKey := cache.HashKey(requestCacheKey(req), "")
 	s.cache.Set(cacheKey, resp)
@@ -343,6 +413,7 @@ func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req
 		if err == nil {
 			if resp.Usage != nil {
 				s.metrics.RecordTokens(name, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+				s.recordUsage(name, req.Model, resp.Usage, r)
 			}
 			log.Printf("gateway: degraded to %s", name)
 			writeJSON(w, http.StatusOK, resp); return true
@@ -372,9 +443,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name strin
 	p, err := s.manager.Get(name)
 	if err != nil { writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()}); return }
 	sp, ok := p.(provider.StreamProvider)
-	if !ok { writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("%s does not support streaming", name)}); return }
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("%s does not support streaming", name),
+			"code":  "BAD_REQUEST"})
+		return
+	}
 	sse, err := stream.NewSSEWriter(w)
-	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "SSE not supported"}); return }
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "SSE not supported", "code": "UNKNOWN_ERROR"})
+		return
+	}
 	ch, err := sp.GenerateStream(r.Context(), req)
 	if err != nil {
 		gw := provider.ClassifyError(name, err, 0)
@@ -388,7 +468,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name strin
 			{"index": 0, "delta": chunk.Delta, "finish_reason": chunk.FinishReason},
 		}})
 	}
-	if pt > 0 || ct > 0 { s.metrics.RecordTokens(name, pt, ct) }
+	if pt > 0 || ct > 0 {
+		s.metrics.RecordTokens(name, pt, ct)
+		s.recordUsage(name, req.Model,
+			&provider.TokenUsage{PromptTokens: pt, CompletionTokens: ct}, r)
+	}
 	sse.SendDone()
 }
 

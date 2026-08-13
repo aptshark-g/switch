@@ -1,6 +1,9 @@
 package provider
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
 	"sync"
 	"time"
 )
@@ -13,42 +16,53 @@ type CostTracker struct {
 	byKey  map[string]*TenantUsage
 	byModel map[string]*ModelUsage
 	total  TotalUsage
+	// 持久化（2026-08-13）: JSONL 追加日志 + 启动重放重建汇总。
+	logPath string
+	// 按 key|日期 的 token 用量（per-key 配额判定, replay 重建）。
+	dailyTokens map[string]int64
 }
 
 // TenantUsage tracks one API key's usage.
 type TenantUsage struct {
-	Key             string
-	PromptTokens    int64
-	CompletionTokens int64
-	Requests        int64
-	CostUSD         float64
-	LastRequest     time.Time
-	Models          map[string]int64 // model → request count
+	Key              string           `json:"key"`
+	PromptTokens     int64            `json:"prompt_tokens"`
+	CompletionTokens int64            `json:"completion_tokens"`
+	Requests         int64            `json:"requests"`
+	CostUSD          float64          `json:"cost_usd"`
+	LastRequest      time.Time        `json:"last_request"`
+	Models           map[string]int64 `json:"models"`
 }
 
 // ModelUsage tracks per-model aggregate usage.
 type ModelUsage struct {
-	Model           string
-	PromptTokens    int64
-	CompletionTokens int64
-	Requests        int64
-	CostUSD         float64
+	Model            string  `json:"model"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	Requests         int64   `json:"requests"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
 // TotalUsage aggregates all usage.
 type TotalUsage struct {
-	PromptTokens    int64
-	CompletionTokens int64
-	Requests        int64
-	CostUSD         float64
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	Requests         int64   `json:"requests"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
-// NewCostTracker creates a cost tracker.
-func NewCostTracker() *CostTracker {
-	return &CostTracker{
-		byKey:   make(map[string]*TenantUsage),
-		byModel: make(map[string]*ModelUsage),
+// NewCostTracker creates a cost tracker. logPath != "" 时启用 JSONL
+// 持久化（启动重放重建汇总 + 每笔追加）。
+func NewCostTracker(logPath string) *CostTracker {
+	ct := &CostTracker{
+		byKey:       make(map[string]*TenantUsage),
+		byModel:     make(map[string]*ModelUsage),
+		logPath:     logPath,
+		dailyTokens: make(map[string]int64),
 	}
+	if logPath != "" {
+		ct.replayLog()
+	}
+	return ct
 }
 
 // Record records token usage for a request and calculates cost.
@@ -60,6 +74,17 @@ func (ct *CostTracker) Record(apiKey, provider, model string, promptTokens, comp
 	if pricing != nil {
 		cost = pricing.Cost(promptTokens, completionTokens)
 	}
+	ts := time.Now()
+	ct.recordLocked(apiKey, provider, model, promptTokens,
+		completionTokens, cost, ts)
+	if ct.logPath != "" {
+		ct.appendLog(apiKey, provider, model, promptTokens,
+			completionTokens, cost, ts)
+	}
+}
+
+func (ct *CostTracker) recordLocked(apiKey, provider, model string,
+	promptTokens, completionTokens int, cost float64, ts time.Time) {
 
 	// Per-key
 	tu := ct.byKey[apiKey]
@@ -71,7 +96,7 @@ func (ct *CostTracker) Record(apiKey, provider, model string, promptTokens, comp
 	tu.CompletionTokens += int64(completionTokens)
 	tu.Requests++
 	tu.CostUSD += cost
-	tu.LastRequest = time.Now()
+	tu.LastRequest = ts
 	tu.Models[model]++
 
 	// Per-model
@@ -90,6 +115,63 @@ func (ct *CostTracker) Record(apiKey, provider, model string, promptTokens, comp
 	ct.total.CompletionTokens += int64(completionTokens)
 	ct.total.Requests++
 	ct.total.CostUSD += cost
+	ct.dailyTokens[apiKey+"|"+ts.Format("2006-01-02")] +=
+		int64(promptTokens + completionTokens)
+}
+
+type usageRecord struct {
+	TS       string  `json:"ts"`
+	Key      string  `json:"key"`
+	Provider string  `json:"provider"`
+	Model    string  `json:"model"`
+	Prompt   int     `json:"prompt_tokens"`
+	Complete int     `json:"completion_tokens"`
+	CostUSD  float64 `json:"cost_usd"`
+}
+
+func (ct *CostTracker) appendLog(apiKey, provider, model string,
+	promptTokens, completionTokens int, cost float64, ts time.Time) {
+	line, err := json.Marshal(usageRecord{
+		TS: ts.Format(time.RFC3339), Key: apiKey, Provider: provider,
+		Model: model, Prompt: promptTokens, Complete: completionTokens,
+		CostUSD: cost,
+	})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(ct.logPath,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
+}
+
+func (ct *CostTracker) replayLog() {
+	f, err := os.Open(ct.logPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var rec usageRecord
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339, rec.TS)
+		ct.recordLocked(rec.Key, rec.Provider, rec.Model,
+			rec.Prompt, rec.Complete, rec.CostUSD, ts)
+	}
+}
+
+// DailyTokens returns today's total tokens for a key (per-key 配额判定)。
+func (ct *CostTracker) DailyTokens(apiKey string) int64 {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	return ct.dailyTokens[apiKey+"|"+time.Now().Format("2006-01-02")]
 }
 
 // TenantSnapshot returns usage for a specific API key.
