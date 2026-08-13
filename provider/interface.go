@@ -17,11 +17,12 @@ type StreamProvider interface {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role            string     `json:"role"`
+	Content         string     `json:"content,omitempty"`
+	ReasoningContent string    `json:"reasoning_content,omitempty"`
+	Name            string     `json:"name,omitempty"`
+	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID      string     `json:"tool_call_id,omitempty"`
 }
 
 type GenerateRequest struct {
@@ -35,6 +36,7 @@ type GenerateRequest struct {
 	Tools          []ToolDef       `json:"tools,omitempty"`
 	ToolChoice     string          `json:"tool_choice,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Thinking       any             `json:"thinking,omitempty"`
 	Extra          map[string]any  `json:"-"`
 }
 
@@ -62,9 +64,10 @@ type StreamChunk struct {
 }
 
 type Delta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ToolDef struct {

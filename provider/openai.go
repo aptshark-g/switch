@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"github.com/aptshark/gateway/observability"
@@ -130,6 +131,7 @@ type openaiChatRequest struct {
 	Tools          []ToolDef       `json:"tools,omitempty"`
 	ToolChoice     any             `json:"tool_choice,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Thinking       any             `json:"thinking,omitempty"`
 }
 
 type openaiChatResponse struct {
@@ -154,6 +156,11 @@ type openaiErrorResponse struct {
 
 func (p *OpenAIProvider) buildRequestBody(req *GenerateRequest, stream bool) ([]byte, error) {
 	model := p.cfg.ResolveModel(req.Model)
+	// 推理开关三层: 请求级 thinking > 厂商级配置 thinking > 默认(思考开)
+	thinking := req.Thinking
+	if thinking == nil {
+		thinking = p.cfg.Thinking
+	}
 	body := openaiChatRequest{
 		Model:          model,
 		Messages:       req.Messages,
@@ -164,6 +171,7 @@ func (p *OpenAIProvider) buildRequestBody(req *GenerateRequest, stream bool) ([]
 		Stop:           req.Stop,
 		Tools:          req.Tools,
 		ResponseFormat: req.ResponseFormat,
+		Thinking:       thinking,
 	}
 	if req.ToolChoice != "" {
 		body.ToolChoice = req.ToolChoice
@@ -207,9 +215,19 @@ func (p *OpenAIProvider) parseResponse(r io.Reader) (*GenerateResponse, error) {
 	}
 	choices := make([]Choice, len(raw.Choices))
 	for i, c := range raw.Choices {
+		msg := c.Message
+		// DeepSeek V4 推理模型（2026-08-13, 社区同款问题 go#11142 /
+		// SkillClaw#70 / vllm#50753）: 思维链与正文共享 max_tokens,
+		// 密集输出时 thinking 吃光预算 → content="" + finish=length,
+		// 答案滞留在 reasoning_content。修复: content 空时透出
+		// reasoning_content（REASONING_FALLBACK=0 可关）。
+		if msg.Content == "" && msg.ReasoningContent != "" &&
+			os.Getenv("REASONING_FALLBACK") != "0" {
+			msg.Content = msg.ReasoningContent
+		}
 		choices[i] = Choice{
 			Index:        c.Index,
-			Message:      c.Message,
+			Message:      msg,
 			FinishReason: c.FinishReason,
 		}
 	}

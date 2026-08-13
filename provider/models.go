@@ -31,6 +31,12 @@ type ProviderConfig struct {
 	Proxy        string            `yaml:"proxy,omitempty" json:"proxy,omitempty"`
 	Backend      ProviderBackend   `yaml:"backend,omitempty" json:"backend,omitempty"`
 	ModelAliases map[string]string `yaml:"model_aliases,omitempty" json:"model_aliases,omitempty"`
+	// 推理开关（2026-08-13）: 厂商级默认思考模式（deepseek-v4 系列默认开）;
+	// 请求级 thinking 字段覆盖此默认（前端后续可传 thinking=false 关思考,
+	// 提取/结构化任务更快更稳）。
+	// 请求级 thinking 字段覆盖此默认（前端后续可传 thinking=false 关思考,
+	// 提取/结构化任务更快更稳）。
+	Thinking any `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 	// P1: Production hardening
 	MaxConcurrency      int  `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
 	AdaptiveConcurrency bool `yaml:"adaptive_concurrency,omitempty" json:"adaptive_concurrency,omitempty"`

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,42 @@ import (
 	"github.com/aptshark/gateway/provider"
 	"github.com/aptshark/gateway/stream"
 )
+
+// messagesCacheKey serializes the full message list (roles + contents,
+// including system prompts) so the response cache distinguishes prompts
+// that share the same last user message but differ in system context.
+func messagesCacheKey(msgs []provider.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		b.WriteString(m.Role)
+		b.WriteString("::")
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// requestCacheKey = messages + generation parameters. Without the gen
+// params, a cached response for max_tokens=16 (truncated, empty content)
+// would be served to a max_tokens=128 request with the same messages —
+// the "LLM returns empty" bug observed 2026-08-11.
+func requestCacheKey(req provider.GenerateRequest) string {
+	var b strings.Builder
+	b.WriteString(messagesCacheKey(req.Messages))
+	b.WriteString("::model=")
+	b.WriteString(req.Model)
+	b.WriteString("::max_tokens=")
+	b.WriteString(fmt.Sprintf("%d", req.MaxTokens))
+	b.WriteString("::temperature=")
+	b.WriteString(fmt.Sprintf("%g", req.Temperature))
+	b.WriteString("::top_p=")
+	b.WriteString(fmt.Sprintf("%g", req.TopP))
+	b.WriteString("::stream=")
+	b.WriteString(fmt.Sprintf("%v", req.Stream))
+	b.WriteString("::thinking=")
+	b.WriteString(fmt.Sprintf("%v", req.Thinking))
+	return b.String()
+}
 
 type Server struct {
 	mux      *http.ServeMux
@@ -35,11 +73,16 @@ type Server struct {
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
+	// 限流可配置（2026-08-11）: DM_GATEWAY_RATE_LIMIT=0 关闭; 默认 60/120。
+	var limiter *RateLimiter
+	if os.Getenv("DM_GATEWAY_RATE_LIMIT") != "0" {
+		limiter = NewRateLimiter(60, 120)
+	}
 	s := &Server{
 		mux:      http.NewServeMux(),
 		manager:  manager,
 		addr:     addr,
-		limiter:  NewRateLimiter(60, 120),
+		limiter:  limiter,
 		metrics:  observability.NewRegistry(),
 		logger:   observability.NewStructuredLogger(),
 		cache:    cache.New(1000, 5*time.Minute),
@@ -104,17 +147,30 @@ func (s *Server) onShutdown() {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	providers := s.manager.List()
 	healthyCount := 0
+	// 并行探测（2026-08-12）: 此前串行逐个 Health()（每个 3s 超时 +
+	// 真实网络往返）→ 9 provider 时 /v1/health 被拉高到 ~100ms+
+	// （无 key provider 也发请求, 阻塞叠加）。并行后耗时 ≈ 最慢单点。
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for _, p := range providers {
-		pv, err := s.manager.Get(p.Name)
-		if err == nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-			hs := pv.Health(ctx)
-			cancel()
-			if hs.Healthy {
-				healthyCount++
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			pv, err := s.manager.Get(name)
+			if err != nil {
+				return
 			}
-		}
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			defer cancel()
+			hs := pv.Health(ctx)
+			if hs.Healthy {
+				mu.Lock()
+				healthyCount++
+				mu.Unlock()
+			}
+		}(p.Name)
 	}
+	wg.Wait()
 	if healthyCount == 0 && len(providers) > 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"status": "degraded", "providers_healthy": 0, "providers_total": len(providers),
@@ -198,7 +254,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !req.Stream {
-		cacheKey := cache.HashKey(req.Messages[len(req.Messages)-1].Content, req.Model)
+		cacheKey := cache.HashKey(requestCacheKey(req), "")
 		if cached, ok := s.cache.Get(cacheKey); ok {
 			s.metrics.CacheHits.Inc()
 			writeJSON(w, http.StatusOK, cached)
@@ -227,7 +283,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if resp.Usage != nil {
 		s.metrics.RecordTokens(providerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
-	cacheKey := cache.HashKey(req.Messages[len(req.Messages)-1].Content, req.Model)
+	cacheKey := cache.HashKey(requestCacheKey(req), "")
 	s.cache.Set(cacheKey, resp)
 	writeJSON(w, http.StatusOK, resp)
 }
