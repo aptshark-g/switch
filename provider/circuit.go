@@ -132,19 +132,48 @@ func (cb *CircuitBreaker) evaluate() {
 
 	// Aggregate rolling window
 	var total, failures, slow int
+	var recentTotal, recentFail int // 近 2 桶（约 12s）用于敏感度
 	for _, b := range cb.buckets {
 		total += b.totalCalls
 		failures += b.failures
 		slow += b.slowCalls
 	}
-	if total < cb.cfg.MinCallsBeforeEvaluation {
+
+	// 自适应敏感度（2026-08-13）: 常出问题的 provider 更快熔断,
+	// 稳定的更宽容 — 阈值在 3-5 次区间内按近期失败率滑动。
+	//   unstable（近 12s 失败率 > 15%）: 3 次 + 40% 阈值（快开）
+	//   stable:                          5 次 + 60% 阈值（宽容）
+	// 近 2 桶 = 最近 ~12s（60s/10 桶）。
+	recentTotal = cb.buckets[cb.currentIdx].totalCalls
+	recentFail = cb.buckets[cb.currentIdx].failures
+	prevIdx := (cb.currentIdx - 1 + len(cb.buckets)) % len(cb.buckets)
+	recentTotal += cb.buckets[prevIdx].totalCalls
+	recentFail += cb.buckets[prevIdx].failures
+
+	minCalls := cb.cfg.MinCallsBeforeEvaluation
+	rateThr := cb.cfg.FailureRateThreshold
+	slowThr := cb.cfg.SlowCallRateThreshold
+	if recentTotal > 0 {
+		recentRate := float64(recentFail) / float64(recentTotal)
+		if recentRate > 0.15 {
+			minCalls = 3          // 常出问题: 更快熔断
+			rateThr = 0.4
+			slowThr = 0.4
+		} else if recentRate < 0.03 && total >= 20 {
+			minCalls = 5          // 稳定: 更宽容（防瞬时抖动误伤）
+			rateThr = 0.6
+			slowThr = 0.6
+		}
+	}
+
+	if total < minCalls {
 		return // cold-start guard
 	}
 
 	failureRate := float64(failures) / float64(total)
 	slowRate := float64(slow) / float64(total)
 
-	if failureRate >= cb.cfg.FailureRateThreshold || slowRate >= cb.cfg.SlowCallRateThreshold {
+	if failureRate >= rateThr || slowRate >= slowThr {
 		cb.transitionTo(CircuitOpen)
 	}
 }

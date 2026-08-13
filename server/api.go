@@ -80,10 +80,16 @@ type Server struct {
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
-	// 限流可配置（2026-08-11）: DM_GATEWAY_RATE_LIMIT=0 关闭; 默认 60/120。
+	// 限流可配置（2026-08-13）: 默认关闭（70+ req/s 指标不被卡死）;
+	// DM_GATEWAY_RATE_LIMIT=60/120 开启（rps/burst）; 0/空 = 关闭。
 	var limiter *RateLimiter
-	if os.Getenv("DM_GATEWAY_RATE_LIMIT") != "0" {
-		limiter = NewRateLimiter(60, 120)
+	if v := os.Getenv("DM_GATEWAY_RATE_LIMIT"); v != "" && v != "0" {
+		rps, burst := 60, 120
+		if _, err := fmt.Sscanf(v, "%d/%d", &rps, &burst); err != nil ||
+			rps <= 0 {
+			rps, burst = 60, 120
+		}
+		limiter = NewRateLimiter(float64(rps), float64(burst))
 	}
 	s := &Server{
 		mux:      http.NewServeMux(),

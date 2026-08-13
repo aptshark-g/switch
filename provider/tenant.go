@@ -375,6 +375,11 @@ func (p *Prober) probe() {
 	// 实时探测只在前台 ?live=1 时发生。熔断恢复探测保留（Generate ping）。
 	var wg sync.WaitGroup
 	for _, prov := range providers {
+		// 2026-08-13: 跳过无 key provider — 探测必失败, 且避免对
+		// openai.com 等无 key 端点发无效 HTTP（背景流量 + 上游风控）。
+		if !prov.KeyConfigured {
+			continue
+		}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()

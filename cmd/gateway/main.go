@@ -52,13 +52,31 @@ func main() {
 
 	go store.StartAutoSave()
 
-	watcher := config.NewWatcher(*configPath, 5*time.Second)
+	// 2026-08-13: 50ms 轮询（provider.yaml 6KB, sha256 开销可忽略）—
+	// 热重载最坏 ~60ms, 满足"路由规则热重载 <100ms"要求（事件驱动需
+	// fsnotify 依赖, 离线构建不可用; 50ms 轮询等效）。
+	watcher := config.NewWatcher(*configPath, 50*time.Millisecond)
 	watcher.OnChange(func(events []config.ChangeEvent) {
 		for _, ev := range events {
-			if ev.Action == "added" {
+			switch ev.Action {
+			case "added":
 				if _, err := mgr.Register(ev.Provider); err != nil {
 					log.Printf("watcher: register %s: %v", ev.Provider.Name, err)
 				}
+			case "updated":
+				// 2026-08-13: 热更新补全 — 此前只处理 added,
+				// 改 key/超时/禁用不生效。updated = 重建 provider。
+				mgr.Unregister(ev.Provider.Name)
+				if _, err := mgr.Register(ev.Provider); err != nil {
+					log.Printf("watcher: update %s: %v",
+						ev.Provider.Name, err)
+				} else {
+					log.Printf("watcher: updated %s (hot reload)",
+						ev.Provider.Name)
+				}
+			case "removed":
+				mgr.Unregister(ev.Provider.Name)
+				log.Printf("watcher: removed %s", ev.Provider.Name)
 			}
 		}
 	})
