@@ -79,6 +79,11 @@ func (rl *RateLimiter) cleanup() {
 func RateLimitMiddleware(rl *RateLimiter, keyFunc func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// DM_GATEWAY_RATE_LIMIT=0 → rl 为 nil, 限流关闭（2026-08-11）
+			if rl == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
 			key := keyFunc(r)
 			if !rl.Allow(key) {
 				w.Header().Set("Retry-After", "1")

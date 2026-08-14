@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 
@@ -23,6 +24,9 @@ type Watcher struct {
 	path     string
 	interval time.Duration
 	lastHash [32]byte
+	// 2026-08-13: 记住上次 provider 集合 — diff 才能产出 added/updated/
+	// removed（此前恒 added, 改 key/超时/禁用不生效）。
+	lastProviders map[string]provider.ProviderConfig
 
 	onChange func([]ChangeEvent)
 
@@ -32,9 +36,10 @@ type Watcher struct {
 // NewWatcher creates a file watcher that polls at the given interval.
 func NewWatcher(path string, interval time.Duration) *Watcher {
 	return &Watcher{
-		path:     path,
-		interval: interval,
-		stopCh:   make(chan struct{}),
+		path:          path,
+		interval:      interval,
+		stopCh:        make(chan struct{}),
+		lastProviders: make(map[string]provider.ProviderConfig),
 	}
 }
 
@@ -115,6 +120,15 @@ func (w *Watcher) updateHash() {
 		return
 	}
 	w.lastHash = sha256.Sum256(data)
+	if cfg, err := Parse(data); err == nil {
+		next := make(map[string]provider.ProviderConfig)
+		for _, p := range cfg.Providers {
+			if p.Enabled {
+				next[p.Name] = p
+			}
+		}
+		w.lastProviders = next
+	}
 }
 
 // diff compares the new config against the last-known state.
@@ -123,14 +137,36 @@ func (w *Watcher) updateHash() {
 // applies add/remove accordingly.
 func (w *Watcher) diff(newCfg *GatewayConfig) []ChangeEvent {
 	var events []ChangeEvent
-
-	// Simple strategy: mark all new providers as "added".
-	// The Manager's Bootstrap handles dedup (register is idempotent via name).
+	next := make(map[string]provider.ProviderConfig)
 	for _, p := range newCfg.Providers {
 		if !p.Enabled {
 			continue
 		}
-		events = append(events, ChangeEvent{Action: "added", Provider: p})
+		next[p.Name] = p
+		old, ok := w.lastProviders[p.Name]
+		switch {
+		case !ok:
+			events = append(events,
+				ChangeEvent{Action: "added", Provider: p})
+		case !sameProvider(old, p):
+			events = append(events,
+				ChangeEvent{Action: "updated", Provider: p})
+		}
 	}
+	for name := range w.lastProviders {
+		if _, ok := next[name]; !ok {
+			events = append(events, ChangeEvent{
+				Action: "removed", Provider: w.lastProviders[name]})
+		}
+	}
+	w.lastProviders = next
 	return events
+}
+
+func sameProvider(a, b provider.ProviderConfig) bool {
+	return a.BaseURL == b.BaseURL && a.APIKey == b.APIKey &&
+		a.TimeoutMs == b.TimeoutMs &&
+		a.DefaultModel == b.DefaultModel &&
+		reflect.DeepEqual(a.Models, b.Models) &&
+		a.Enabled == b.Enabled
 }
