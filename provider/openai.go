@@ -110,7 +110,25 @@ func (p *OpenAIProvider) generateViaStream(ctx context.Context,
 		content.WriteString(chunk.Delta.Content)
 		reasoning.WriteString(chunk.Delta.ReasoningContent)
 		if len(chunk.Delta.ToolCalls) > 0 {
-			toolCalls = append(toolCalls, chunk.Delta.ToolCalls...)
+			// 2026-08-14 fix: merge streamed tool_call deltas by index
+			// (each chunk is a fragment: id/name then N argument pieces)
+			for _, tc := range chunk.Delta.ToolCalls {
+				if tc.Index >= 0 && tc.Index < len(toolCalls) {
+					cur := &toolCalls[tc.Index]
+					if tc.ID != "" {
+						cur.ID = tc.ID
+					}
+					if tc.Type != "" {
+						cur.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
+						cur.Function.Name = tc.Function.Name
+					}
+					cur.Function.Arguments += tc.Function.Arguments
+				} else {
+					toolCalls = append(toolCalls, tc)
+				}
+			}
 		}
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
