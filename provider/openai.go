@@ -110,25 +110,7 @@ func (p *OpenAIProvider) generateViaStream(ctx context.Context,
 		content.WriteString(chunk.Delta.Content)
 		reasoning.WriteString(chunk.Delta.ReasoningContent)
 		if len(chunk.Delta.ToolCalls) > 0 {
-			// 2026-08-14 fix: merge streamed tool_call deltas by index
-			// (each chunk is a fragment: id/name then N argument pieces)
-			for _, tc := range chunk.Delta.ToolCalls {
-				if tc.Index >= 0 && tc.Index < len(toolCalls) {
-					cur := &toolCalls[tc.Index]
-					if tc.ID != "" {
-						cur.ID = tc.ID
-					}
-					if tc.Type != "" {
-						cur.Type = tc.Type
-					}
-					if tc.Function.Name != "" {
-						cur.Function.Name = tc.Function.Name
-					}
-					cur.Function.Arguments += tc.Function.Arguments
-				} else {
-					toolCalls = append(toolCalls, tc)
-				}
-			}
+			toolCalls = mergeToolCalls(toolCalls, chunk.Delta.ToolCalls)
 		}
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
@@ -430,3 +412,28 @@ var sharedTransport = &http.Transport{
 
 
 
+
+// mergeToolCalls 合并流式 tool_call 分片（按 OpenAI index）。
+// 每个流式 chunk 的 delta.tool_calls 是碎片: 首片带 id/name,
+// 后续 N 片只带 arguments 增量; 必须按 index 合并, 否则一次调用
+// 变 N 条碎片且 arguments 恒空（2026-08-14 空回复根因之一）。
+func mergeToolCalls(acc []ToolCall, delta []ToolCall) []ToolCall {
+	for _, tc := range delta {
+		if tc.Index >= 0 && tc.Index < len(acc) {
+			cur := &acc[tc.Index]
+			if tc.ID != "" {
+				cur.ID = tc.ID
+			}
+			if tc.Type != "" {
+				cur.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				cur.Function.Name = tc.Function.Name
+			}
+			cur.Function.Arguments += tc.Function.Arguments
+		} else {
+			acc = append(acc, tc)
+		}
+	}
+	return acc
+}
