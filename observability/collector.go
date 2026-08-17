@@ -148,6 +148,13 @@ func (w *responseWrapper) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+// Unwrap 让 http.NewResponseController 穿透包装层，恢复底层 Flusher
+// （2026-08-17 FIX: 网关流式恒 500 "feature not supported" — 无 Unwrap 时
+// ResponseController 找不到真实 Flusher, SSE 无法建立）。
+func (w *responseWrapper) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func statusGroup(code int) string {
 	switch {
 	case code < 300:

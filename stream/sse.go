@@ -11,20 +11,22 @@ import (
 
 type SSEWriter struct {
 	w       io.Writer
-	flusher http.Flusher
+	rc      *http.ResponseController
 }
 
 func NewSSEWriter(w http.ResponseWriter) (*SSEWriter, error) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return nil, fmt.Errorf("stream: ResponseWriter does not support flushing")
-	}
+	// 2026-08-17 FIX: 中间件链包装 ResponseWriter 后 w.(http.Flusher)
+	// 断言失败 → 网关流式恒 500 "SSE not supported"。Go 1.20+ 标准做法
+	// http.NewResponseController(w).Flush() 支持任意包装层透传。
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-	return &SSEWriter{w: w, flusher: flusher}, nil
+	rc := http.NewResponseController(w)
+	if err := rc.Flush(); err != nil {
+		return nil, fmt.Errorf("stream: flush: %w", err)
+	}
+	return &SSEWriter{w: w, rc: rc}, nil
 }
 
 func (s *SSEWriter) Send(event string, data any) error {
@@ -36,13 +38,12 @@ func (s *SSEWriter) Send(event string, data any) error {
 		fmt.Fprintf(s.w, "event: %s\n", event)
 	}
 	fmt.Fprintf(s.w, "data: %s\n\n", payload)
-	s.flusher.Flush()
-	return nil
+	return s.rc.Flush()
 }
 
 func (s *SSEWriter) SendDone() {
 	fmt.Fprintf(s.w, "data: [DONE]\n\n")
-	s.flusher.Flush()
+	_ = s.rc.Flush()
 }
 
 func PipeStream(s *SSEWriter, ch <-chan *provider.StreamChunk) {

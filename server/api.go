@@ -458,7 +458,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name strin
 	sse, err := stream.NewSSEWriter(w)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "SSE not supported", "code": "UNKNOWN_ERROR"})
+			"error": fmt.Sprintf("SSE init failed: %v", err), "code": "UNKNOWN_ERROR"})
 		return
 	}
 	ch, err := sp.GenerateStream(r.Context(), req)
