@@ -32,3 +32,8 @@ cache/
 provider.yaml
 gateway.state.json
 gateway_test.log
+
+# Runtime logs / state (generated)
+usage_log.jsonl
+gateway.state.json
+*.log

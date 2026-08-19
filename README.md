@@ -18,6 +18,14 @@
 | 📊 **诊断端点** | /v1/diagnostics — 每个 Provider 的 key/base_url/circuit 状态 |
 | 🔄 **热重载** | 5s 轮询 provider.yaml + Admin API |
 | 📈 **SLO 燃烧率** | 短窗口(1h) + 长窗口(6h) 双检测 |
+| 🔁 **流式聚合** | SSE tool_call 按 index 合并碎片/空 arguments（空回复根因修复） |
+| 💰 **计费持久化** | CostTracker JSONL 落盘 + 重放, per-key / per-model 精细化分摊 |
+| 🔑 **per-key 配额** | 租户级 token 配额 + 每日用量 |
+| 📕 **错误码目录** | /v1/error-catalog — 错误码 → 含义 → 处置建议 |
+| 🩹 **admin 页** | 零依赖控制台: providers / 计费 / 用量 / 配额 |
+| ⚡ **热更新 diff** | 50ms 生效, added/updated/removed 明细 |
+| 🛡️ **自适应熔断** | 3-5 次失败窗口, 恢复探测, 按成功率自动调整 |
+| 🧭 **Bearer 认证** | API key + admin token（env 注入, 密钥不入库） |
 
 ---
 
@@ -51,7 +59,29 @@ curl http://localhost:8080/v1/diagnostics
 
 ---
 
+## 性能（实测）
+
+`cmd/gwbench` 压测: **3.4K – 22.8K req/s**, 转发 p50 < 1ms
+（相比直连上游的额外开销, 满足「协议转换新增 <10ms」指标）。
+负载超限时 shedder 自动丢弃/排队, 不拖垮上游。
+
+---
+
+## 下载 / 构建
+
+- **Release 二进制**: 打 tag（`v*`）自动触发 CI 构建 Windows/Linux/macOS 产物
+  （见 `.github/workflows/release.yml`）。
+- **源码构建**: 需要 Go 1.26+
+
+```bash
+go build -o gateway ./cmd/gateway     # Linux/macOS
+go build -o gateway.exe ./cmd/gateway # Windows
+```
+
+---
+
 ## 与 DialogMesh 绑定
+
 
 switch 是 DialogMesh v6 的 LLM 代理层。一键启动：
 
