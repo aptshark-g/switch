@@ -1,4 +1,4 @@
-﻿package observability
+package observability
 
 import (
 	"context"
@@ -16,16 +16,16 @@ import (
 
 // LogEntry is a structured JSON log line.
 type LogEntry struct {
-	Timestamp  string `json:"ts"`
-	Level      string `json:"level"`
-	RequestID  string `json:"request_id,omitempty"`
-	Method     string `json:"method,omitempty"`
-	Path       string `json:"path,omitempty"`
-	Provider   string `json:"provider,omitempty"`
-	Status     int    `json:"status,omitempty"`
-	LatencyMs  float64 `json:"latency_ms,omitempty"`
-	ClientIP   string `json:"client_ip,omitempty"`
-	Msg        string `json:"msg"`
+	Timestamp string  `json:"ts"`
+	Level     string  `json:"level"`
+	RequestID string  `json:"request_id,omitempty"`
+	Method    string  `json:"method,omitempty"`
+	Path      string  `json:"path,omitempty"`
+	Provider  string  `json:"provider,omitempty"`
+	Status    int     `json:"status,omitempty"`
+	LatencyMs float64 `json:"latency_ms,omitempty"`
+	ClientIP  string  `json:"client_ip,omitempty"`
+	Msg       string  `json:"msg"`
 }
 
 // StructuredLogger writes JSON log lines to the standard logger.
@@ -56,6 +56,7 @@ func (l *StructuredLogger) Error(entry LogEntry) {
 // ---------------------------------------------------------------------------
 
 type ctxKey int
+
 const requestIDKey ctxKey = iota
 
 // NewRequestID generates a short unique request identifier.
@@ -111,13 +112,13 @@ func MetricsMiddleware(reg *Registry, logger *StructuredLogger) func(http.Handle
 				reg.RateLimitHits.Inc()
 			}
 
-	// Record status code group.
-	reg.RequestsByStatus.get(statusGroup(wr.status)).Inc()
+			// Record status code group.
+			reg.RequestsByStatus.get(statusGroup(wr.status)).Inc()
 
-	// Structured log.
-	// Record status code group.
-	reg.RequestsByStatus.get(statusGroup(wr.status)).Inc()
-	entry := LogEntry{
+			// Structured log.
+			// Record status code group.
+			reg.RequestsByStatus.get(statusGroup(wr.status)).Inc()
+			entry := LogEntry{
 				RequestID: reqID,
 				Method:    r.Method,
 				Path:      r.URL.Path,
@@ -184,5 +185,3 @@ func (r *Registry) RecordTokensFull(provider string, prompt, completion, cached,
 		r.PromptCacheMisses.Inc()
 	}
 }
-
-

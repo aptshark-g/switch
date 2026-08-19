@@ -1,4 +1,4 @@
-﻿package server
+package server
 
 import (
 	"context"
@@ -57,16 +57,16 @@ func requestCacheKey(req provider.GenerateRequest) string {
 }
 
 type Server struct {
-	mux      *http.ServeMux
-	manager  *provider.Manager
-	addr     string
-	limiter  *RateLimiter
-	metrics  *observability.Registry
-	logger   *observability.StructuredLogger
-	cache    *cache.Cache
-	watcher  *config.Watcher
-	authCfg  config.AuthConfig
-	store    *persistence.Store
+	mux         *http.ServeMux
+	manager     *provider.Manager
+	addr        string
+	limiter     *RateLimiter
+	metrics     *observability.Registry
+	logger      *observability.StructuredLogger
+	cache       *cache.Cache
+	watcher     *config.Watcher
+	authCfg     config.AuthConfig
+	store       *persistence.Store
 	shedder     *LoadShedder
 	routingPool map[string]bool
 	poolMutex   sync.RWMutex
@@ -92,17 +92,17 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		limiter = NewRateLimiter(float64(rps), float64(burst))
 	}
 	s := &Server{
-		mux:      http.NewServeMux(),
-		manager:  manager,
-		addr:     addr,
-		limiter:  limiter,
-		metrics:  observability.NewRegistry(),
-		logger:   observability.NewStructuredLogger(),
-		cache:    cache.New(1000, 5*time.Minute),
-		watcher:  watcher,
-		authCfg:  authCfg,
-		store:    store,
-		shedder:  NewLoadShedder(5000),
+		mux:         http.NewServeMux(),
+		manager:     manager,
+		addr:        addr,
+		limiter:     limiter,
+		metrics:     observability.NewRegistry(),
+		logger:      observability.NewStructuredLogger(),
+		cache:       cache.New(1000, 5*time.Minute),
+		watcher:     watcher,
+		authCfg:     authCfg,
+		store:       store,
+		shedder:     NewLoadShedder(5000),
 		healthCache: make(map[string]*provider.HealthStatus),
 		costs: provider.NewCostTracker(func() string {
 			if p := os.Getenv("DM_GATEWAY_USAGE_LOG"); p != "" {
@@ -273,7 +273,7 @@ func (s *Server) handleHealthDetail(w http.ResponseWriter, r *http.Request) {
 		"go_version": runtime.Version(), "num_goroutines": runtime.NumGoroutine(),
 		"memory_alloc_mb": float64(mem.Alloc) / 1024 / 1024,
 		"memory_total_mb": float64(mem.Sys) / 1024 / 1024,
-		"cache_entries": s.cache.Size(), "semaphore_waiting": s.manager.TotalSemaphoreWaiting(), "load_shed_total": s.shedder.Shed(), "load_shed_inflight": s.shedder.InFlight(), "active_connections": s.metrics.Snapshot().ActiveConnections,
+		"cache_entries":   s.cache.Size(), "semaphore_waiting": s.manager.TotalSemaphoreWaiting(), "load_shed_total": s.shedder.Shed(), "load_shed_inflight": s.shedder.InFlight(), "active_connections": s.metrics.Snapshot().ActiveConnections,
 		"providers": s.manager.List(),
 	})
 }
@@ -317,14 +317,20 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateRequest(req *provider.GenerateRequest) error {
-	if len(req.Messages) == 0 { return fmt.Errorf("messages array must not be empty") }
+	if len(req.Messages) == 0 {
+		return fmt.Errorf("messages array must not be empty")
+	}
 	for i, msg := range req.Messages {
-		if msg.Role == "" { return fmt.Errorf("messages[%d]: role is required", i) }
+		if msg.Role == "" {
+			return fmt.Errorf("messages[%d]: role is required", i)
+		}
 	}
 	if req.Temperature < 0 || req.Temperature > 2.0 {
 		return fmt.Errorf("temperature must be between 0 and 2 (got %.2f)", req.Temperature)
 	}
-	if req.MaxTokens < 0 { return fmt.Errorf("max_tokens must be non-negative") }
+	if req.MaxTokens < 0 {
+		return fmt.Errorf("max_tokens must be non-negative")
+	}
 	return nil
 }
 
@@ -345,7 +351,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.IncModel(req.Model)
-	if req.Stream { s.metrics.StreamRequests.Inc() } else { s.metrics.NonStreamReqs.Inc() }
+	if req.Stream {
+		s.metrics.StreamRequests.Inc()
+	} else {
+		s.metrics.NonStreamReqs.Inc()
+	}
 	providerName := r.URL.Query().Get("provider")
 	if providerName == "" {
 		providerName = s.getRoutingProvider()
@@ -408,14 +418,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, gw.Kind.HTTPStatus(), map[string]string{
 			"error": gw.Message, "kind": gw.Kind.String(),
-			"code":  gw.Code(), "provider": providerName,
+			"code": gw.Code(), "provider": providerName,
 		})
 		return
 	}
 	if resp.Usage != nil {
 		s.metrics.RecordTokensFull(providerName,
-				resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
-				resp.Usage.Cached(), resp.Usage.CachedMiss())
+			resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
+			resp.Usage.Cached(), resp.Usage.CachedMiss())
 		s.recordUsage(providerName, req.Model, resp.Usage, r)
 	}
 	apiKey := "anon"
@@ -430,42 +440,59 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req *provider.GenerateRequest, exclude string) bool {
 	for _, name := range s.getRoutingCandidates() {
-		if name == exclude { continue }
+		if name == exclude {
+			continue
+		}
 		resp, err := s.manager.Generate(r.Context(), name, req)
 		if err == nil {
 			if resp.Usage != nil {
 				s.metrics.RecordTokensFull(name,
-				resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
-				resp.Usage.Cached(), resp.Usage.CachedMiss())
+					resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
+					resp.Usage.Cached(), resp.Usage.CachedMiss())
 				s.recordUsage(name, req.Model, resp.Usage, r)
 			}
 			log.Printf("gateway: degraded to %s", name)
-			writeJSON(w, http.StatusOK, resp); return true
+			writeJSON(w, http.StatusOK, resp)
+			return true
 		}
-		if !provider.ClassifyError(name, err, 0).Kind.Retryable() { continue }
+		if !provider.ClassifyError(name, err, 0).Kind.Retryable() {
+			continue
+		}
 	}
 	return false
 }
 
 func (s *Server) getRoutingCandidates() []string {
-	s.poolMutex.RLock(); defer s.poolMutex.RUnlock()
+	s.poolMutex.RLock()
+	defer s.poolMutex.RUnlock()
 	seen := map[string]bool{}
 	var res []string
 	for name, in := range s.routingPool {
-		if !in { continue }
+		if !in {
+			continue
+		}
 		for _, p := range s.manager.List() {
-			if p.Name == name && p.Active && p.KeyConfigured { seen[name]=true; res=append(res, name); break }
+			if p.Name == name && p.Active && p.KeyConfigured {
+				seen[name] = true
+				res = append(res, name)
+				break
+			}
 		}
 	}
 	for _, p := range s.manager.List() {
-		if !seen[p.Name] && p.Active && p.KeyConfigured { res=append(res, p.Name) }
+		if !seen[p.Name] && p.Active && p.KeyConfigured {
+			res = append(res, p.Name)
+		}
 	}
 	return res
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name string, req *provider.GenerateRequest) {
 	p, err := s.manager.Get(name)
-	if err != nil { writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()}); return }
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
 	sp, ok := p.(provider.StreamProvider)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -482,11 +509,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name strin
 	ch, err := sp.GenerateStream(r.Context(), req)
 	if err != nil {
 		gw := provider.ClassifyError(name, err, 0)
-		_ = sse.Send("error", map[string]string{"message": gw.Message, "kind": gw.Kind.String()}); return
+		_ = sse.Send("error", map[string]string{"message": gw.Message, "kind": gw.Kind.String()})
+		return
 	}
 	var pt, ct, cached, miss int
 	for chunk := range ch {
-		if chunk.Error != nil { _ = sse.Send("error", map[string]string{"message": chunk.Error.Error()}); return }
+		if chunk.Error != nil {
+			_ = sse.Send("error", map[string]string{"message": chunk.Error.Error()})
+			return
+		}
 		if chunk.Usage != nil {
 			pt = chunk.Usage.PromptTokens
 			ct = chunk.Usage.CompletionTokens
@@ -512,6 +543,3 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		log.Printf("gateway: json encode error: %v", err)
 	}
 }
-
-
-

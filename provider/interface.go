@@ -17,12 +17,12 @@ type StreamProvider interface {
 }
 
 type Message struct {
-	Role            string     `json:"role"`
-	Content         string     `json:"content,omitempty"`
-	ReasoningContent string    `json:"reasoning_content,omitempty"`
-	Name            string     `json:"name,omitempty"`
-	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID      string     `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type GenerateRequest struct {
@@ -104,11 +104,11 @@ type TokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 	// 2026-08-19: 上游上下文缓存命中/未命中（OpenAI cached_tokens /
 	// DeepSeek prompt_cache_hit_tokens / Anthropic cache_read_input_tokens）
-	PromptTokensDetails     *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
-	PromptCacheHitTokens    int                  `json:"prompt_cache_hit_tokens,omitempty"`
-	PromptCacheMissTokens   int                  `json:"prompt_cache_miss_tokens,omitempty"`
-	CacheReadInputTokens    int                  `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens,omitempty"`
+	PromptTokensDetails      *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptCacheHitTokens     int                  `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens    int                  `json:"prompt_cache_miss_tokens,omitempty"`
+	CacheReadInputTokens     int                  `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                  `json:"cache_creation_input_tokens,omitempty"`
 }
 
 type PromptTokensDetails struct {

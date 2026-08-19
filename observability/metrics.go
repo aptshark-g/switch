@@ -1,4 +1,4 @@
-﻿package observability
+package observability
 
 import (
 	"fmt"
@@ -108,8 +108,8 @@ func (h *Histogram) percentile(p float64, counts []int64, total int64) float64 {
 // ---------------------------------------------------------------------------
 
 type labeledCounter struct {
-	mu      sync.RWMutex
-	m       map[string]*Counter
+	mu sync.RWMutex
+	m  map[string]*Counter
 }
 
 func newLabeledCounter() *labeledCounter {
@@ -189,23 +189,23 @@ func (lh *labeledHistogram) snapshot() map[string]*HistogramSnapshot {
 // ---------------------------------------------------------------------------
 
 type Registry struct {
-	RequestsByProvider  *labeledCounter
-	RequestsByModel     *labeledCounter
-	RequestsByEndpoint  *labeledCounter
-	RequestsByStatus    *labeledCounter
-	ErrorsByProvider    *labeledCounter
-	TokensPrompt        *labeledCounter
-	TokensCompletion    *labeledCounter
-	LatencyByProvider   *labeledHistogram
+	RequestsByProvider *labeledCounter
+	RequestsByModel    *labeledCounter
+	RequestsByEndpoint *labeledCounter
+	RequestsByStatus   *labeledCounter
+	ErrorsByProvider   *labeledCounter
+	TokensPrompt       *labeledCounter
+	TokensCompletion   *labeledCounter
+	LatencyByProvider  *labeledHistogram
 
-	CacheHits      Counter
-	CacheMisses    Counter
-	PromptCacheHits  Counter
+	CacheHits         Counter
+	CacheMisses       Counter
+	PromptCacheHits   Counter
 	PromptCacheMisses Counter
-	RateLimitHits  Counter
-	CircuitOpens   Counter
-	StreamRequests Counter
-	NonStreamReqs  Counter
+	RateLimitHits     Counter
+	CircuitOpens      Counter
+	StreamRequests    Counter
+	NonStreamReqs     Counter
 
 	ActiveConnections Gauge
 	CacheSize         Gauge
@@ -233,30 +233,29 @@ func (r *Registry) IncModel(model string) { r.RequestsByModel.get(model).Inc() }
 
 func (r *Registry) Uptime() float64 { return time.Since(r.startTime).Seconds() }
 
-
 // MetricsSnapshot is the JSON-serialisable view.
 type MetricsSnapshot struct {
-	UptimeSeconds      float64                          `json:"uptime_seconds"`
-	RequestsByProvider map[string]int64                 `json:"requests_by_provider"`
-	RequestsByModel    map[string]int64                 `json:"requests_by_model"`
-	RequestsByEndpoint map[string]int64                 `json:"requests_by_endpoint"`
-	RequestsByStatus   map[string]int64                 `json:"requests_by_status"`
-	ErrorsByProvider   map[string]int64                 `json:"errors_by_provider"`
-	TokensPrompt       map[string]int64                 `json:"tokens_prompt"`
-	TokensCompletion   map[string]int64                 `json:"tokens_completion"`
-	LatencyByProvider  map[string]*HistogramSnapshot     `json:"latency_by_provider"`
-	CacheHits          int64                            `json:"cache_hits"`
-	CacheMisses        int64                            `json:"cache_misses"`
-	CacheHitRate       float64                          `json:"cache_hit_rate"`
-	PromptCacheHits    int64                            `json:"prompt_cache_hits"`
-	PromptCacheMisses  int64                            `json:"prompt_cache_misses"`
-	PromptCacheHitRate float64                          `json:"prompt_cache_hit_rate"`
-	RateLimitHits      int64                            `json:"rate_limit_hits"`
-	CircuitOpens       int64                            `json:"circuit_opens"`
-	StreamRequests     int64                            `json:"stream_requests"`
-	NonStreamRequests  int64                            `json:"non_stream_requests"`
-	ActiveConnections  int64                            `json:"active_connections"`
-	CacheSize          int64                            `json:"cache_size"`
+	UptimeSeconds      float64                       `json:"uptime_seconds"`
+	RequestsByProvider map[string]int64              `json:"requests_by_provider"`
+	RequestsByModel    map[string]int64              `json:"requests_by_model"`
+	RequestsByEndpoint map[string]int64              `json:"requests_by_endpoint"`
+	RequestsByStatus   map[string]int64              `json:"requests_by_status"`
+	ErrorsByProvider   map[string]int64              `json:"errors_by_provider"`
+	TokensPrompt       map[string]int64              `json:"tokens_prompt"`
+	TokensCompletion   map[string]int64              `json:"tokens_completion"`
+	LatencyByProvider  map[string]*HistogramSnapshot `json:"latency_by_provider"`
+	CacheHits          int64                         `json:"cache_hits"`
+	CacheMisses        int64                         `json:"cache_misses"`
+	CacheHitRate       float64                       `json:"cache_hit_rate"`
+	PromptCacheHits    int64                         `json:"prompt_cache_hits"`
+	PromptCacheMisses  int64                         `json:"prompt_cache_misses"`
+	PromptCacheHitRate float64                       `json:"prompt_cache_hit_rate"`
+	RateLimitHits      int64                         `json:"rate_limit_hits"`
+	CircuitOpens       int64                         `json:"circuit_opens"`
+	StreamRequests     int64                         `json:"stream_requests"`
+	NonStreamRequests  int64                         `json:"non_stream_requests"`
+	ActiveConnections  int64                         `json:"active_connections"`
+	CacheSize          int64                         `json:"cache_size"`
 }
 
 func (r *Registry) Snapshot() *MetricsSnapshot {
@@ -358,9 +357,3 @@ func sortedKeys(m map[string]*HistogramSnapshot) []string {
 	sort.Strings(keys)
 	return keys
 }
-
-
-
-
-
-
