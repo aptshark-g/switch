@@ -61,9 +61,17 @@ curl http://localhost:8080/v1/diagnostics
 
 ## 性能（实测）
 
-`cmd/gwbench` 压测: **3.4K – 22.8K req/s**, 转发 p50 < 1ms
-（相比直连上游的额外开销, 满足「协议转换新增 <10ms」指标）。
-负载超限时 shedder 自动丢弃/排队, 不拖垮上游。
+`cmd/gwbench` 压测（2026-08-19 实测, 本机 Windows）:
+
+- **热缓存吞吐**: 5000 请求 / 1.19s = **4210 req/s**, p50 11.3ms / p99 49.4ms,
+  命中率 **99.5%**（缓存命中响应 ~2ms vs 未命中真实上游 ~1.08s）
+- 此前压测: **3.4K – 22.8K req/s**, 转发 p50 < 1ms
+- 负载超限时 shedder 自动丢弃/排队, 不拖垮上游
+
+**缓存与隔离**: 响应缓存命中率 99.5%; 缓存键 =
+`provider|model|api_key|X-Context-Hash`（跨租户/模型/Provider 隔离）;
+上游前缀缓存命中（OpenAI cached_tokens / DeepSeek prompt_cache_hit /
+Anthropic cache_read）透传统计（`/v1/stats.prompt_cache_hit_rate`）。
 
 ---
 
