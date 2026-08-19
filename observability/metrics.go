@@ -243,6 +243,7 @@ type MetricsSnapshot struct {
 	LatencyByProvider  map[string]*HistogramSnapshot     `json:"latency_by_provider"`
 	CacheHits          int64                            `json:"cache_hits"`
 	CacheMisses        int64                            `json:"cache_misses"`
+	CacheHitRate       float64                          `json:"cache_hit_rate"`
 	RateLimitHits      int64                            `json:"rate_limit_hits"`
 	CircuitOpens       int64                            `json:"circuit_opens"`
 	StreamRequests     int64                            `json:"stream_requests"`
@@ -264,6 +265,7 @@ func (r *Registry) Snapshot() *MetricsSnapshot {
 		LatencyByProvider:  r.LatencyByProvider.snapshot(),
 		CacheHits:          r.CacheHits.Value(),
 		CacheMisses:        r.CacheMisses.Value(),
+		CacheHitRate:       r.cacheHitRate(),
 		RateLimitHits:      r.RateLimitHits.Value(),
 		CircuitOpens:       r.CircuitOpens.Value(),
 		StreamRequests:     r.StreamRequests.Value(),
@@ -271,6 +273,15 @@ func (r *Registry) Snapshot() *MetricsSnapshot {
 		ActiveConnections:  r.ActiveConnections.Value(),
 		CacheSize:          r.CacheSize.Value(),
 	}
+}
+
+// cacheHitRate returns hits/(hits+misses), 0 when no non-stream requests yet.
+func (r *Registry) cacheHitRate() float64 {
+	h, m := r.CacheHits.Value(), r.CacheMisses.Value()
+	if h+m == 0 {
+		return 0
+	}
+	return float64(h) / float64(h+m)
 }
 
 func (r *Registry) PrometheusText() string {

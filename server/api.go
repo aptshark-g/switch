@@ -376,7 +376,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !req.Stream {
-		cacheKey := cache.HashKey(requestCacheKey(req), "")
+		// 2026-08-19: 缓存隔离 — 键纳入 provider|model|api_key,
+		// 避免跨租户/跨模型/跨 Provider 误命中（此前 model 传空串）。
+		apiKey := "anon"
+		if h := r.Header.Get("Authorization"); len(h) > 7 {
+			apiKey = h[7:]
+		}
+		cacheKey := cache.HashKey(requestCacheKey(req),
+			providerName+"|"+req.Model+"|"+apiKey)
 		if cached, ok := s.cache.Get(cacheKey); ok {
 			s.metrics.CacheHits.Inc()
 			writeJSON(w, http.StatusOK, cached)
@@ -407,7 +414,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.metrics.RecordTokens(providerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 		s.recordUsage(providerName, req.Model, resp.Usage, r)
 	}
-	cacheKey := cache.HashKey(requestCacheKey(req), "")
+	apiKey := "anon"
+	if h := r.Header.Get("Authorization"); len(h) > 7 {
+		apiKey = h[7:]
+	}
+	cacheKey := cache.HashKey(requestCacheKey(req),
+		providerName+"|"+req.Model+"|"+apiKey)
 	s.cache.Set(cacheKey, resp)
 	writeJSON(w, http.StatusOK, resp)
 }
