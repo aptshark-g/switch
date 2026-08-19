@@ -174,4 +174,15 @@ func (r *Registry) RecordTokens(provider string, prompt, completion int) {
 	r.TokensCompletion.get(provider).Add(int64(completion))
 }
 
+// RecordTokensFull records token usage + upstream context-cache hit/miss.
+func (r *Registry) RecordTokensFull(provider string, prompt, completion, cached, miss int) {
+	r.RecordTokens(provider, prompt, completion)
+	if cached > 0 {
+		r.PromptCacheHits.Inc()
+	}
+	if miss > 0 {
+		r.PromptCacheMisses.Inc()
+	}
+}
+
 

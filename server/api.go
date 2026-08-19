@@ -378,12 +378,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !req.Stream {
 		// 2026-08-19: 缓存隔离 — 键纳入 provider|model|api_key,
 		// 避免跨租户/跨模型/跨 Provider 误命中（此前 model 传空串）。
+		// X-Context-Hash: 后端（DialogMesh 上下文编译器）可传编译上下文
+		// 的稳定哈希, 相同编译上下文即使原始消息格式有差异也能命中。
 		apiKey := "anon"
 		if h := r.Header.Get("Authorization"); len(h) > 7 {
 			apiKey = h[7:]
 		}
 		cacheKey := cache.HashKey(requestCacheKey(req),
-			providerName+"|"+req.Model+"|"+apiKey)
+			providerName+"|"+req.Model+"|"+apiKey+"|"+r.Header.Get("X-Context-Hash"))
 		if cached, ok := s.cache.Get(cacheKey); ok {
 			s.metrics.CacheHits.Inc()
 			writeJSON(w, http.StatusOK, cached)
@@ -411,7 +413,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resp.Usage != nil {
-		s.metrics.RecordTokens(providerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		s.metrics.RecordTokensFull(providerName,
+				resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
+				resp.Usage.Cached(), resp.Usage.CachedMiss())
 		s.recordUsage(providerName, req.Model, resp.Usage, r)
 	}
 	apiKey := "anon"
@@ -419,7 +423,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		apiKey = h[7:]
 	}
 	cacheKey := cache.HashKey(requestCacheKey(req),
-		providerName+"|"+req.Model+"|"+apiKey)
+		providerName+"|"+req.Model+"|"+apiKey+"|"+r.Header.Get("X-Context-Hash"))
 	s.cache.Set(cacheKey, resp)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -430,7 +434,9 @@ func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req
 		resp, err := s.manager.Generate(r.Context(), name, req)
 		if err == nil {
 			if resp.Usage != nil {
-				s.metrics.RecordTokens(name, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+				s.metrics.RecordTokensFull(name,
+				resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
+				resp.Usage.Cached(), resp.Usage.CachedMiss())
 				s.recordUsage(name, req.Model, resp.Usage, r)
 			}
 			log.Printf("gateway: degraded to %s", name)
@@ -478,16 +484,21 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name strin
 		gw := provider.ClassifyError(name, err, 0)
 		_ = sse.Send("error", map[string]string{"message": gw.Message, "kind": gw.Kind.String()}); return
 	}
-	var pt, ct int
+	var pt, ct, cached, miss int
 	for chunk := range ch {
 		if chunk.Error != nil { _ = sse.Send("error", map[string]string{"message": chunk.Error.Error()}); return }
-		if chunk.Usage != nil { pt = chunk.Usage.PromptTokens; ct = chunk.Usage.CompletionTokens }
+		if chunk.Usage != nil {
+			pt = chunk.Usage.PromptTokens
+			ct = chunk.Usage.CompletionTokens
+			cached = chunk.Usage.Cached()
+			miss = chunk.Usage.CachedMiss()
+		}
 		_ = sse.Send("", map[string]any{"id": chunk.ID, "model": chunk.Model, "choices": []map[string]any{
 			{"index": 0, "delta": chunk.Delta, "finish_reason": chunk.FinishReason},
 		}})
 	}
 	if pt > 0 || ct > 0 {
-		s.metrics.RecordTokens(name, pt, ct)
+		s.metrics.RecordTokensFull(name, pt, ct, cached, miss)
 		s.recordUsage(name, req.Model,
 			&provider.TokenUsage{PromptTokens: pt, CompletionTokens: ct}, r)
 	}
@@ -501,8 +512,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		log.Printf("gateway: json encode error: %v", err)
 	}
 }
-
-
 
 
 

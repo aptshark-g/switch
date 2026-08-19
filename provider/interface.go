@@ -102,4 +102,46 @@ type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// 2026-08-19: 上游上下文缓存命中/未命中（OpenAI cached_tokens /
+	// DeepSeek prompt_cache_hit_tokens / Anthropic cache_read_input_tokens）
+	PromptTokensDetails     *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptCacheHitTokens    int                  `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens   int                  `json:"prompt_cache_miss_tokens,omitempty"`
+	CacheReadInputTokens    int                  `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// Cached returns upstream context-cache hit tokens (whichever schema).
+func (u *TokenUsage) Cached() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptCacheHitTokens > 0 {
+		return u.PromptCacheHitTokens
+	}
+	if u.CacheReadInputTokens > 0 {
+		return u.CacheReadInputTokens
+	}
+	if u.PromptTokensDetails != nil {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return 0
+}
+
+// CachedMiss returns upstream context-cache miss tokens (whichever schema).
+func (u *TokenUsage) CachedMiss() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptCacheMissTokens > 0 {
+		return u.PromptCacheMissTokens
+	}
+	if u.CacheCreationInputTokens > 0 {
+		return u.CacheCreationInputTokens
+	}
+	return 0
 }

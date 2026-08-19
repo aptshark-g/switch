@@ -200,6 +200,8 @@ type Registry struct {
 
 	CacheHits      Counter
 	CacheMisses    Counter
+	PromptCacheHits  Counter
+	PromptCacheMisses Counter
 	RateLimitHits  Counter
 	CircuitOpens   Counter
 	StreamRequests Counter
@@ -221,6 +223,8 @@ func NewRegistry() *Registry {
 		TokensPrompt:       newLabeledCounter(),
 		TokensCompletion:   newLabeledCounter(),
 		LatencyByProvider:  newLabeledHistogram(),
+		PromptCacheHits:    Counter{name: "gateway_prompt_cache_hits"},
+		PromptCacheMisses:  Counter{name: "gateway_prompt_cache_misses"},
 		startTime:          time.Now(),
 	}
 }
@@ -244,6 +248,9 @@ type MetricsSnapshot struct {
 	CacheHits          int64                            `json:"cache_hits"`
 	CacheMisses        int64                            `json:"cache_misses"`
 	CacheHitRate       float64                          `json:"cache_hit_rate"`
+	PromptCacheHits    int64                            `json:"prompt_cache_hits"`
+	PromptCacheMisses  int64                            `json:"prompt_cache_misses"`
+	PromptCacheHitRate float64                          `json:"prompt_cache_hit_rate"`
 	RateLimitHits      int64                            `json:"rate_limit_hits"`
 	CircuitOpens       int64                            `json:"circuit_opens"`
 	StreamRequests     int64                            `json:"stream_requests"`
@@ -266,6 +273,9 @@ func (r *Registry) Snapshot() *MetricsSnapshot {
 		CacheHits:          r.CacheHits.Value(),
 		CacheMisses:        r.CacheMisses.Value(),
 		CacheHitRate:       r.cacheHitRate(),
+		PromptCacheHits:    r.PromptCacheHits.Value(),
+		PromptCacheMisses:  r.PromptCacheMisses.Value(),
+		PromptCacheHitRate: r.promptCacheHitRate(),
 		RateLimitHits:      r.RateLimitHits.Value(),
 		CircuitOpens:       r.CircuitOpens.Value(),
 		StreamRequests:     r.StreamRequests.Value(),
@@ -278,6 +288,15 @@ func (r *Registry) Snapshot() *MetricsSnapshot {
 // cacheHitRate returns hits/(hits+misses), 0 when no non-stream requests yet.
 func (r *Registry) cacheHitRate() float64 {
 	h, m := r.CacheHits.Value(), r.CacheMisses.Value()
+	if h+m == 0 {
+		return 0
+	}
+	return float64(h) / float64(h+m)
+}
+
+// promptCacheHitRate = 上游上下文缓存命中请求占比（有 cached/miss 信号才计）。
+func (r *Registry) promptCacheHitRate() float64 {
+	h, m := r.PromptCacheHits.Value(), r.PromptCacheMisses.Value()
 	if h+m == 0 {
 		return 0
 	}

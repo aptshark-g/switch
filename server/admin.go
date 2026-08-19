@@ -68,9 +68,12 @@ async function main(){
     const s=await j("/v1/stats");
     document.getElementById("stats").innerHTML=tbl(
       ["tokens_prompt","tokens_completion","cache_hits","cache_misses",
+       "cache_hit_rate","prompt_cache_hit_rate",
        "requests","active_connections"],
       [[s.tokens_prompt||0,s.tokens_completion||0,s.cache_hits||0,
-        s.cache_misses||0,s.total_requests||s.requests||0,
+        s.cache_misses||0,Math.round((s.cache_hit_rate||0)*100)+"%",
+        Math.round((s.prompt_cache_hit_rate||0)*100)+"%",
+        s.total_requests||s.requests||0,
         s.active_connections||0]]);
     const u=await j("/v1/usage");
     document.getElementById("usage").innerHTML=tbl(
