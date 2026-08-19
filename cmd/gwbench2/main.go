@@ -1,8 +1,10 @@
 // gwbench2 — 网关扩展压测（2026-08-20）:
-//   -mode miss    未命中路径（每请求唯一 body, 全部走真实上游, mock 上游测网关开销）
-//   -mode stream  长上下文 SSE 流式并发
-//   -mode stab    高并发稳定性（固定时长, 采样延迟分布）
-//   -mode err     上游错误注入（429）, 观察错误分类/熔断
+//
+//	-mode miss    未命中路径（每请求唯一 body, 全部走真实上游, mock 上游测网关开销）
+//	-mode stream  长上下文 SSE 流式并发
+//	-mode stab    高并发稳定性（固定时长, 采样延迟分布）
+//	-mode err     上游错误注入（429）, 观察错误分类/熔断
+//
 // 用法: go run ./cmd/gwbench2 -url http://127.0.0.1:8080/v1/chat/completions -mode miss -n 2000 -c 32
 package main
 

@@ -12,10 +12,10 @@ import (
 
 // CostTracker records token usage and cost per API key, model, and provider.
 type CostTracker struct {
-	mu     sync.RWMutex
-	byKey  map[string]*TenantUsage
+	mu      sync.RWMutex
+	byKey   map[string]*TenantUsage
 	byModel map[string]*ModelUsage
-	total  TotalUsage
+	total   TotalUsage
 	// 持久化（2026-08-13）: JSONL 追加日志 + 启动重放重建汇总。
 	logPath string
 	// 2026-08-20: 持久化日志句柄 + 独立写锁（此前每请求 OpenFile+Close
@@ -183,11 +183,14 @@ func (ct *CostTracker) DailyTokens(apiKey string) int64 {
 
 // TenantSnapshot returns usage for a specific API key.
 func (ct *CostTracker) TenantSnapshot(apiKey string) *TenantUsage {
-	ct.mu.RLock(); defer ct.mu.RUnlock()
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
 	if tu, ok := ct.byKey[apiKey]; ok {
 		copy := *tu
 		copy.Models = make(map[string]int64)
-		for k, v := range tu.Models { copy.Models[k] = v }
+		for k, v := range tu.Models {
+			copy.Models[k] = v
+		}
 		return &copy
 	}
 	return nil
@@ -195,13 +198,16 @@ func (ct *CostTracker) TenantSnapshot(apiKey string) *TenantUsage {
 
 // Snapshot returns a full usage snapshot suitable for API responses.
 func (ct *CostTracker) Snapshot() *CostSnapshot {
-	ct.mu.RLock(); defer ct.mu.RUnlock()
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
 
 	byKey := make(map[string]TenantUsage, len(ct.byKey))
 	for k, v := range ct.byKey {
 		copy := *v
 		copy.Models = make(map[string]int64)
-		for mk, mv := range v.Models { copy.Models[mk] = mv }
+		for mk, mv := range v.Models {
+			copy.Models[mk] = mv
+		}
 		byKey[k] = copy
 	}
 
@@ -220,10 +226,10 @@ func (ct *CostTracker) Snapshot() *CostSnapshot {
 
 // CostSnapshot is the JSON-serialisable view of cost data.
 type CostSnapshot struct {
-	Total       TotalUsage              `json:"total"`
-	ByKey       map[string]TenantUsage  `json:"by_key,omitempty"`
-	ByModel     map[string]ModelUsage   `json:"by_model,omitempty"`
-	TenantCount int                     `json:"tenant_count"`
+	Total       TotalUsage             `json:"total"`
+	ByKey       map[string]TenantUsage `json:"by_key,omitempty"`
+	ByModel     map[string]ModelUsage  `json:"by_model,omitempty"`
+	TenantCount int                    `json:"tenant_count"`
 }
 
 // ModelWhitelist controls which models a tenant can access.
@@ -239,16 +245,22 @@ func NewModelWhitelist() *ModelWhitelist {
 
 // SetWhitelist sets allowed models for an API key. Empty list = all allowed.
 func (mw *ModelWhitelist) SetWhitelist(apiKey string, models []string) {
-	mw.mu.Lock(); defer mw.mu.Unlock()
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
 	set := make(map[string]bool, len(models))
-	for _, m := range models { set[m] = true }
+	for _, m := range models {
+		set[m] = true
+	}
 	mw.m[apiKey] = set
 }
 
 // IsAllowed checks if a tenant can use the given model.
 func (mw *ModelWhitelist) IsAllowed(apiKey, model string) bool {
-	mw.mu.RLock(); defer mw.mu.RUnlock()
+	mw.mu.RLock()
+	defer mw.mu.RUnlock()
 	set, ok := mw.m[apiKey]
-	if !ok || len(set) == 0 { return true } // no whitelist → all allowed
+	if !ok || len(set) == 0 {
+		return true
+	} // no whitelist → all allowed
 	return set[model]
 }
