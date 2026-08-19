@@ -61,17 +61,20 @@ curl http://localhost:8080/v1/diagnostics
 
 ## 性能（实测）
 
-`cmd/gwbench` 压测（2026-08-19 实测, 本机 Windows）:
+压测（2026-08-20 实测, 本机 Windows; 完整报告 docs/BENCH_20260820.md）:
 
-- **热缓存吞吐**: 5000 请求 / 1.19s = **4210 req/s**, p50 11.3ms / p99 49.4ms,
-  命中率 **99.5%**（缓存命中响应 ~2ms vs 未命中真实上游 ~1.08s）
-- 此前压测: **3.4K – 22.8K req/s**, 转发 p50 < 1ms
-- 负载超限时 shedder 自动丢弃/排队, 不拖垮上游
+- **缓存命中**: 4210 req/s（64 并发）, 命中率 99.5%, 命中响应 ~2ms vs
+  未命中真实上游 ~1.08s
+- **未命中路径**（真实上游链路）: 2781–2873 req/s（32–64 并发, p50 11–21ms）
+- **高并发稳定**: 128 并发常驻 10s = 2607 req/s, **0 失败**, RSS ~29MB
+- **长上下文流式 SSE**: 300 并发流 0 失败, 19500 事件完整收齐
+- **错误场景**: 50% 429 注入 → 正确分类 + 熔断自动恢复
+- 此前压测: 3.4K – 22.8K req/s（纯缓存命中转发, p50 < 1ms）
 
-**缓存与隔离**: 响应缓存命中率 99.5%; 缓存键 =
-`provider|model|api_key|X-Context-Hash`（跨租户/模型/Provider 隔离）;
-上游前缀缓存命中（OpenAI cached_tokens / DeepSeek prompt_cache_hit /
-Anthropic cache_read）透传统计（`/v1/stats.prompt_cache_hit_rate`）。
+**缓存与隔离**: 缓存键 = `provider|model|api_key|X-Context-Hash`
+（跨租户/模型/Provider 隔离）; 上游前缀缓存命中（OpenAI cached_tokens /
+DeepSeek prompt_cache_hit / Anthropic cache_read）透传统计
+（`/v1/stats.prompt_cache_hit_rate`）。
 
 ---
 

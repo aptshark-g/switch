@@ -18,6 +18,10 @@ type CostTracker struct {
 	total  TotalUsage
 	// 持久化（2026-08-13）: JSONL 追加日志 + 启动重放重建汇总。
 	logPath string
+	// 2026-08-20: 持久化日志句柄 + 独立写锁（此前每请求 OpenFile+Close
+	// 且占用全局锁 → 高并发 miss 路径吞吐暴跌, 实测 128 并发仅 138 req/s）
+	logFile *os.File
+	logMu   sync.Mutex
 	// 按 key|日期 的 token 用量（per-key 配额判定, replay 重建）。
 	dailyTokens map[string]int64
 }
@@ -61,6 +65,10 @@ func NewCostTracker(logPath string) *CostTracker {
 	}
 	if logPath != "" {
 		ct.replayLog()
+		if f, err := os.OpenFile(logPath,
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			ct.logFile = f
+		}
 	}
 	return ct
 }
@@ -139,13 +147,12 @@ func (ct *CostTracker) appendLog(apiKey, provider, model string,
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(ct.logPath,
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
+	ct.logMu.Lock()
+	defer ct.logMu.Unlock()
+	if ct.logFile == nil {
 		return
 	}
-	defer f.Close()
-	_, _ = f.Write(append(line, '\n'))
+	_, _ = ct.logFile.Write(append(line, '\n'))
 }
 
 func (ct *CostTracker) replayLog() {
