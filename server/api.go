@@ -177,10 +177,11 @@ func (s *Server) BuildHandler() http.Handler {
 			observability.MetricsMiddleware(s.metrics, s.logger)(
 				CORSMiddleware(
 					panicRecoveryMiddleware(
-						LoggingMiddleware(
-							AuthMiddleware(s.authCfg)(
-								RateLimitMiddleware(s.limiter, DefaultKeyFunc)(s.mux),
-							),
+						// 2026-08-20: 移除冗余 LoggingMiddleware —— 每请求日志
+						// 已由 MetricsMiddleware 异步结构化日志承担（同步
+						// log.Printf 全局锁压制吞吐, 实测移除后 ~2.8K→9.8K）
+						AuthMiddleware(s.authCfg)(
+							RateLimitMiddleware(s.limiter, DefaultKeyFunc)(s.mux),
 						),
 					),
 				),

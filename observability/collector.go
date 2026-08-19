@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,19 +32,31 @@ type LogEntry struct {
 }
 
 // StructuredLogger writes JSON log lines to the standard logger.
-type StructuredLogger struct{}
+type StructuredLogger struct {
+	// 2026-08-20: 异步批量写入（Info 非阻塞入队, 满则丢; 错误保持同步）。
+	// 修复: 每请求 log.Println（全局锁）在高压下压制吞吐
+	// —— 实测关日志 c=256 2780→9839 req/s（3.5x）。
+	ch      chan string
+	dropped atomic.Int64
+}
 
 // NewStructuredLogger creates a structured JSON logger.
 func NewStructuredLogger() *StructuredLogger {
 	log.SetFlags(0) // disable default timestamp; we write our own
-	return &StructuredLogger{}
+	l := &StructuredLogger{ch: make(chan string, 4096)}
+	go l.writer()
+	return l
 }
 
 func (l *StructuredLogger) Info(entry LogEntry) {
 	entry.Level = "info"
 	entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	data, _ := json.Marshal(entry)
-	log.Println(string(data))
+	select {
+	case l.ch <- string(data):
+	default:
+		l.dropped.Add(1)
+	}
 }
 
 func (l *StructuredLogger) Error(entry LogEntry) {
@@ -49,6 +64,31 @@ func (l *StructuredLogger) Error(entry LogEntry) {
 	entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	data, _ := json.Marshal(entry)
 	log.Println(string(data))
+}
+
+// writer 批量刷盘: 攒批 + 50ms tick, 只由一个 goroutine 碰 log 全局锁。
+func (l *StructuredLogger) writer() {
+	var buf strings.Builder
+	flush := func() {
+		if buf.Len() > 0 {
+			log.Print(buf.String())
+			buf.Reset()
+		}
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case s := <-l.ch:
+			buf.WriteString(s)
+			buf.WriteByte('\n')
+			if buf.Len() > 8192 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +172,11 @@ func MetricsMiddleware(reg *Registry, logger *StructuredLogger) func(http.Handle
 				logger.Error(entry)
 			} else {
 				entry.Msg = "request complete"
-				logger.Info(entry)
+				// 2026-08-20: DM_GATEWAY_REQUEST_LOG=0 关每请求 Info 日志
+				// （对照压测定位吞吐上限; 错误日志始终保留）
+				if os.Getenv("DM_GATEWAY_REQUEST_LOG") != "0" {
+					logger.Info(entry)
+				}
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -113,6 +114,9 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		log.Printf("gateway: %s %s %s", r.Method, r.URL.Path, time.Since(start))
+		// 2026-08-20: DM_GATEWAY_REQUEST_LOG=0 关每请求日志（对照压测）
+		if os.Getenv("DM_GATEWAY_REQUEST_LOG") != "0" {
+			log.Printf("gateway: %s %s %s", r.Method, r.URL.Path, time.Since(start))
+		}
 	})
 }
