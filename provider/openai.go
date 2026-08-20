@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -27,10 +28,20 @@ type OpenAIProvider struct {
 // NewOpenAIProvider constructs an OpenAIProvider from the given config.
 func NewOpenAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
 	if cfg.Proxy != "" {
-		// Proxy support can be added via http.ProxyURL
+		// 2026-08-21 接线: Proxy 字段此前声明未实现（分支内无 ProxyURL,
+		// 静默走直连）。现在按 http.ProxyURL 走代理（如 clash 7877）。
+		proxyURL, err := url.Parse(cfg.Proxy)
+		if err != nil {
+			return nil, fmt.Errorf("openai: invalid proxy %q: %w", cfg.Proxy, err)
+		}
 		transport := &http.Transport{
 			MaxIdleConns:    20,
 			IdleConnTimeout: 90 * time.Second,
+			Proxy:           http.ProxyURL(proxyURL),
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
 		}
 		return &OpenAIProvider{
 			cfg: cfg,
@@ -244,7 +255,9 @@ type openaiErrorResponse struct {
 }
 
 func (p *OpenAIProvider) buildRequestBody(req *GenerateRequest, stream bool) ([]byte, error) {
-	model := p.cfg.ResolveModel(req.Model)
+	// 2026-08-21: 别名解析接线 — model_aliases（fast/pro/large/small）此前
+	// 声明未实现; 智能路由规则可用别名指向模型档位, 这里统一解析。
+	model := p.cfg.ResolveModelAlias(req.Model)
 	// 推理开关三层: 请求级 thinking > 厂商级配置 thinking > 默认(思考开)
 	thinking := req.Thinking
 	if thinking == nil {

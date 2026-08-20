@@ -16,6 +16,38 @@ type GatewayConfig struct {
 	Defaults  DefaultsConfig            `json:"defaults,omitempty" yaml:"defaults,omitempty"`
 	Server    ServerConfig              `json:"server,omitempty" yaml:"server,omitempty"`
 	Auth      AuthConfig                `json:"auth,omitempty" yaml:"auth,omitempty"`
+	Routing   RoutingConfig             `json:"routing,omitempty" yaml:"routing,omitempty"`
+}
+
+// RoutingConfig 智能路由（2026-08-21）: 意图/复杂度规则层 + 池内加权选择。
+// 规则命中 → 按 route 动作路由; 未命中 → 回落到加权随机池
+// （priority × weight × health × latency × cost, 见 server/routing.go）。
+type RoutingConfig struct {
+	Rules []RoutingRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
+type RoutingRule struct {
+	Name  string        `json:"name" yaml:"name"`
+	Match RoutingMatch  `json:"match" yaml:"match"`
+	Route RoutingAction `json:"route" yaml:"route"`
+}
+
+type RoutingMatch struct {
+	// Intent 支持逗号分隔多值（任一命中）; 空 = 任意意图。
+	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
+	// Complexity: simple | medium | complex; 空 = 任意复杂度。
+	Complexity string `json:"complexity,omitempty" yaml:"complexity,omitempty"`
+	// Model: 请求 model（含别名）; 空 = 任意模型。
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+}
+
+type RoutingAction struct {
+	// Provider: 目标 provider; 空 = 回落加权随机池（仅应用 model/thinking 覆盖）。
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Model: 覆盖请求 model（支持别名）; 空 = 沿用请求 model。
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+	// Thinking: 覆盖思考模式（{"type":"disabled"} 等）; 空 = 沿用请求。
+	Thinking any `json:"thinking,omitempty" yaml:"thinking,omitempty"`
 }
 
 type DefaultsConfig struct {

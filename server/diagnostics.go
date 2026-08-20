@@ -58,6 +58,8 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"providers":         diags,
+		"routing_strategy":  "weighted_random",
+		"routing_rules":     s.routingRules,
 		"problems_detected": problemCount,
 		"uptime_seconds":    s.metrics.Uptime(),
 		"go_version":        runtime.Version(),

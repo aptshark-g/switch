@@ -56,7 +56,13 @@ func main() {
 	// 热重载最坏 ~60ms, 满足"路由规则热重载 <100ms"要求（事件驱动需
 	// fsnotify 依赖, 离线构建不可用; 50ms 轮询等效）。
 	watcher := config.NewWatcher(*configPath, 50*time.Millisecond)
+	var srv *server.Server // 闭包前向引用: 先声明, watcher 首次触发前赋值
 	watcher.OnChange(func(events []config.ChangeEvent) {
+		// 2026-08-21: 路由规则同文件热更新 — diff 只报 provider 事件,
+		// 规则段变更需整文件重读; 6KB 解析开销可忽略（50ms 轮询频率）。
+		if fresh, err := config.ParseFile(*configPath); err == nil && srv != nil {
+			srv.SetRoutingRules(fresh.Routing.Rules)
+		}
 		for _, ev := range events {
 			switch ev.Action {
 			case "added":
@@ -86,7 +92,9 @@ func main() {
 	if cfg.Server.Port > 0 {
 		serverAddr = fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	}
-	srv := server.NewWithWatcher(mgr, serverAddr, watcher, cfg.Auth, store)
+	srv = server.NewWithWatcher(mgr, serverAddr, watcher, cfg.Auth, store)
+	// 2026-08-21: 智能路由规则注入（意图/复杂度 → provider）。
+	srv.SetRoutingRules(cfg.Routing.Rules)
 
 	// Start background health prober (30s interval) — 2026-08-13:
 	// 全量并行探测 + 健康缓存（/v1/health 读缓存即时返回）。

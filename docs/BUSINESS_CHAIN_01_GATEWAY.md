@@ -143,6 +143,13 @@ v2.0:
 
 ### 2.1 加权路由
 
+> ✅ 2026-08-21 已实现（server/routing.go + routing_pool.go + config/parser.go）:
+> 池内加权随机 = priority 分层（one-api 语义）× weight × health（探测不健康
+> ×0.1 保底）× latency（1 - p50/5000）× cost（层内最便宜价归一）;
+> 熔断 OPEN 不进首选（全挂时退化）; 降级候选链改为确定性偏好序。
+> 并新增意图/复杂度规则层（X-Intent / X-Complexity → routing.rules,
+> 吸收 cortiq-gateway / leyline / RouteLLM / LiteLLM 模式）; 单测 10 例全绿。
+
 ```
 v1.0:
   ?provider=deepseek → 就它

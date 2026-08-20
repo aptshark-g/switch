@@ -114,6 +114,22 @@ func (m *Manager) Get(name string) (Provider, error) {
 	return p, nil
 }
 
+// Config returns the latest registered config for a provider (智能路由:
+// priority/weight/pricing 等路由字段的读取入口; 热更新后即最新值）。
+func (m *Manager) Config(name string) (ProviderConfig, bool) {
+	m.mu.RLock(); defer m.mu.RUnlock()
+	cfg, ok := m.allConfigs[name]
+	return cfg, ok
+}
+
+// Circuit returns the circuit-breaker state for a provider.
+func (m *Manager) Circuit(name string) (CircuitState, bool) {
+	m.mu.RLock(); defer m.mu.RUnlock()
+	cb, ok := m.circuits[name]
+	if !ok { return CircuitClosed, false }
+	return cb.State(), true
+}
+
 // List returns all configured providers with their current state.
 // Active=true means the provider is enabled AND has a valid API key configured.
 // This is the correct semantic for routing: we only route to ready providers.
@@ -128,6 +144,8 @@ func (m *Manager) List() []ProviderSnapshot {
 			Name: name, Kind: cfg.Kind, BaseURL: cfg.BaseURL,
 			Active: active, Models: cfg.Models, Healthy: active,
 			KeyConfigured: isKeyConfigured(cfg),
+			Priority:      cfg.Priority,
+			Weight:        cfg.Weight,
 		}
 		if cb, ok := m.circuits[name]; ok { s.Circuit = cb.State() }
 		out = append(out, s)

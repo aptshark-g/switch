@@ -6,10 +6,16 @@ import (
 )
 
 type RoutingPoolEntry struct {
-	Name   string `json:"name"`
-	Active bool   `json:"active"`
-	HasKey bool   `json:"has_key"`
-	InPool bool   `json:"in_pool"`
+	Name            string  `json:"name"`
+	Active          bool    `json:"active"`
+	HasKey          bool    `json:"has_key"`
+	InPool          bool    `json:"in_pool"`
+	Priority        int     `json:"priority"`
+	Weight          int     `json:"weight"`
+	Score           float64 `json:"score,omitempty"`
+	Circuit         string  `json:"circuit,omitempty"`
+	Health          string  `json:"health,omitempty"`
+	HealthLatencyMs int64   `json:"health_latency_ms,omitempty"`
 }
 
 func (s *Server) handleRoutingPool(w http.ResponseWriter, r *http.Request) {
@@ -30,14 +36,40 @@ func (s *Server) listRoutingPool(w http.ResponseWriter, r *http.Request) {
 	providers := s.manager.List()
 	var entries []RoutingPoolEntry
 	for _, p := range providers {
+		health := "unknown"
+		var latency int64
+		if hs := s.getHealth(p.Name); hs != nil {
+			if hs.Healthy {
+				health = "healthy"
+			} else {
+				health = "unhealthy"
+			}
+			latency = hs.LatencyMs
+		}
+		score := 0.0
+		if p.Active && p.KeyConfigured {
+			if cfg, ok := s.manager.Config(p.Name); ok {
+				score = s.effectiveWeight(p, cfg, 0)
+			}
+		}
 		entries = append(entries, RoutingPoolEntry{
-			Name:   p.Name,
-			Active: p.Active,
-			HasKey: p.KeyConfigured,
-			InPool: s.routingPool[p.Name],
+			Name:            p.Name,
+			Active:          p.Active,
+			HasKey:          p.KeyConfigured,
+			InPool:          s.routingPool[p.Name],
+			Priority:        p.Priority,
+			Weight:          p.Weight,
+			Score:           score,
+			Circuit:         string(p.Circuit),
+			Health:          health,
+			HealthLatencyMs: latency,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"routing_pool": entries})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"strategy":      "weighted_random",
+		"routing_pool":  entries,
+		"routing_rules": s.routingRules,
+	})
 }
 
 type toggleRoutingReq struct {
@@ -97,22 +129,7 @@ func (s *Server) toggleRoutingPool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRoutingProvider() string {
-	s.poolMutex.RLock()
-	defer s.poolMutex.RUnlock()
-
-	for name, inPool := range s.routingPool {
-		if !inPool { continue }
-		for _, p := range s.manager.List() {
-			if p.Name == name && p.Active && p.KeyConfigured {
-				return name
-			}
-		}
-	}
-	// Fallback to first active+key
-	for _, p := range s.manager.List() {
-		if p.Active && p.KeyConfigured {
-			return p.Name
-		}
-	}
-	return ""
+	// 2026-08-21: 原"首个匹配" → 智能加权随机（priority 分层 × weight ×
+	// health × latency × cost; 熔断 OPEN 不进首选）。
+	return s.selectFromPool()
 }

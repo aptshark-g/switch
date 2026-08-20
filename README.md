@@ -33,7 +33,7 @@ Groq / OpenRouter / LM Studio / Ollama）, 一套 OpenAI 兼容接口同时对�
 | 🔀 **多 Provider 路由** | DeepSeek / OpenAI / Anthropic / Gemini / LMStudio / Ollama |
 | 🛡️ **三层保护** | 信号量 → 速率限制 → 滑动窗口断路器 |
 | ⚡ **自适应并发** | Gradient2 算法, 根据延迟梯度动态调整 |
-| 🎯 **加权路由** | health_score × latency × cost × priority |
+| 🎯 **智能路由** | 意图/复杂度规则层（X-Intent + X-Complexity → routing.rules, cortiq-gateway/leyline 模式）+ 池内加权随机（priority 分层 × weight × health × latency × cost, 2026-08-21 实测） |
 | 🔗 **请求合并** | 同 key 并发请求 → 1 次上游调用 |
 | 📊 **诊断端点** | /v1/diagnostics — 每个 Provider 的 key/base_url/circuit 状态 |
 | 🔄 **热重载** | 5s 轮询 provider.yaml + Admin API |

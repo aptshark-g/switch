@@ -34,9 +34,13 @@ type ProviderConfig struct {
 	// 推理开关（2026-08-13）: 厂商级默认思考模式（deepseek-v4 系列默认开）;
 	// 请求级 thinking 字段覆盖此默认（前端后续可传 thinking=false 关思考,
 	// 提取/结构化任务更快更稳）。
-	// 请求级 thinking 字段覆盖此默认（前端后续可传 thinking=false 关思考,
-	// 提取/结构化任务更快更稳）。
 	Thinking any `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+	// 智能路由（2026-08-20）: priority = 优先级分层（越大越优先, 0=默认）;
+	// weight = 同层内加权随机权重（0/缺省 = 1）。路由时先取最高 priority 层,
+	// 层内按 weight × health × latency × cost 加权随机（见 server/routing.go）。
+	// 对齐 docs/BUSINESS_CHAIN_01_GATEWAY.md §2.1 加权路由设计。
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Weight   int `yaml:"weight,omitempty" json:"weight,omitempty"`
 	// P1: Production hardening
 	MaxConcurrency      int  `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
 	AdaptiveConcurrency bool `yaml:"adaptive_concurrency,omitempty" json:"adaptive_concurrency,omitempty"`
@@ -50,6 +54,20 @@ func (c *ProviderConfig) ResolveModel(requested string) string {
 		return requested
 	}
 	return c.DefaultModel
+}
+
+// ResolveModelAlias resolves a model alias (fast/pro/large/small) to a real
+// model name. Aliases were declared in provider.yaml but never wired into the
+// upstream request (2026-08-21): rules and clients may now pass aliases and
+// they resolve against this provider's ModelAliases table.
+func (c *ProviderConfig) ResolveModelAlias(requested string) string {
+	if requested == "" {
+		return c.ResolveModel(requested)
+	}
+	if m, ok := c.ModelAliases[requested]; ok {
+		return m
+	}
+	return c.ResolveModel(requested)
 }
 
 func (c *ProviderConfig) Timeout() time.Duration {
@@ -101,5 +119,7 @@ type ProviderSnapshot struct {
 	Circuit   CircuitState `json:"circuit_state"`
 	KeyConfigured bool     `json:"key_configured"`
 	LatencyMs int64        `json:"latency_ms,omitempty"`
+	Priority  int          `json:"priority,omitempty"`
+	Weight    int          `json:"weight,omitempty"`
 }
 

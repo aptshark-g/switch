@@ -70,6 +70,10 @@ type Server struct {
 	shedder     *LoadShedder
 	routingPool map[string]bool
 	poolMutex   sync.RWMutex
+	// 智能路由规则（2026-08-21）: provider.yaml routing.rules, watcher
+	// 热更新时由 main 调 SetRoutingRules 刷新（意图/复杂度 → provider）。
+	routingRules []config.RoutingRule
+	routingMu    sync.RWMutex
 	// 健康缓存（2026-08-13）: 后台 Prober 每 30s 并行探测写入;
 	// /v1/health 读缓存即时返回, ?live=1 才实时探测。
 	healthCache map[string]*provider.HealthStatus
@@ -357,9 +361,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.metrics.NonStreamReqs.Inc()
 	}
+	// 2026-08-21: 智能路由 — 显式 ?provider= 优先; 否则规则层
+	// （X-Intent/X-Complexity → routing.rules）→ 池内加权随机。
+	// 规则可覆盖 model/thinking（如 casual → 小模型关思考）。
 	providerName := r.URL.Query().Get("provider")
 	if providerName == "" {
-		providerName = s.getRoutingProvider()
+		decision := s.routeRequest(r, &req)
+		providerName = decision.provider
+		if providerName == "" {
+			providerName = s.getRoutingProvider()
+		}
+		if decision.model != "" {
+			req.Model = decision.model
+		}
+		if decision.thinking != nil {
+			req.Thinking = decision.thinking
+		}
+		s.logRouting(r, decision, providerName)
 		if providerName == "" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"error": "no routing provider available — configure keys in Gateway page",
@@ -464,28 +482,8 @@ func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req
 }
 
 func (s *Server) getRoutingCandidates() []string {
-	s.poolMutex.RLock()
-	defer s.poolMutex.RUnlock()
-	seen := map[string]bool{}
-	var res []string
-	for name, in := range s.routingPool {
-		if !in {
-			continue
-		}
-		for _, p := range s.manager.List() {
-			if p.Name == name && p.Active && p.KeyConfigured {
-				seen[name] = true
-				res = append(res, name)
-				break
-			}
-		}
-	}
-	for _, p := range s.manager.List() {
-		if !seen[p.Name] && p.Active && p.KeyConfigured {
-			res = append(res, p.Name)
-		}
-	}
-	return res
+	// 2026-08-21: 确定性偏好序（熔断靠后, priority desc → score desc）。
+	return s.routingCandidates()
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, name string, req *provider.GenerateRequest) {
