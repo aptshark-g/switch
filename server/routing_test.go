@@ -20,8 +20,8 @@ type mockProvider struct {
 	fail bool
 }
 
-func (m *mockProvider) Name() string                         { return m.name }
-func (m *mockProvider) Config() *provider.ProviderConfig     { return &m.cfg }
+func (m *mockProvider) Name() string                     { return m.name }
+func (m *mockProvider) Config() *provider.ProviderConfig { return &m.cfg }
 func (m *mockProvider) Health(ctx context.Context) *provider.HealthStatus {
 	return &provider.HealthStatus{Healthy: !m.fail}
 }

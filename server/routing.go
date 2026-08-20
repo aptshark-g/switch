@@ -210,9 +210,10 @@ func (s *Server) routingCandidates() []string {
 }
 
 // effectiveWeight 有效权重（设计 §2.1: weight = health × latency × cost × weight）:
-//   health: 探测不健康 → 0.1（保底 10% 流量）; 健康/未知 → 1
-//   latency: 1 - p50/5000 钳制 [0.05, 1]; 无数据 → 1
-//   cost: 层内最便宜 input 价 / 本家 input 价 钳制 [0.1, 1]; 无 pricing → 1
+//
+//	health: 探测不健康 → 0.1（保底 10% 流量）; 健康/未知 → 1
+//	latency: 1 - p50/5000 钳制 [0.05, 1]; 无数据 → 1
+//	cost: 层内最便宜 input 价 / 本家 input 价 钳制 [0.1, 1]; 无 pricing → 1
 func (s *Server) effectiveWeight(snap provider.ProviderSnapshot,
 	cfg provider.ProviderConfig, tierMinInput float64) float64 {
 	w := float64(cfg.Weight)
@@ -316,7 +317,7 @@ func (s *Server) logRouting(r *http.Request, d routeDecision, providerName strin
 	s.logger.Info(observability.LogEntry{
 		RequestID: observability.GetRequestID(r.Context()),
 		Provider:  providerName,
-		Msg:       "routing: " + d.by +
+		Msg: "routing: " + d.by +
 			" intent=" + d.intent +
 			" complexity=" + d.complexity,
 	})
