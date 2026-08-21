@@ -2,6 +2,9 @@
 
 > 整合两版讨论稿，形成可直接指导开发的设计基线。  
 > 核心目标：在云厂商前缀缓存机制下，通过**固化前缀、心跳预热、滚雪球、有界负载亲和路由**，实现高缓存命中率与负载均衡的共存。
+>
+> v1.1（2026-08-21 评审修正，5 项）：命中归属推断机制 / 状态存储进程内先行 /
+> 80% 目标分阶段 / P3 折叠缓存断裂预算 / 预热帽按全价最坏场景。新增 §14 配置形态。
 
 ---
 
@@ -109,6 +112,13 @@ P4 本轮输入     user 本轮 + 动态时间/request_id         不可缓存�
 
 指纹树示例：`fp0123 = sha256(fp012 || P3)` 为主亲和键。各层独立计数，以定位哪一层在滚雪球或拖后腿。
 
+**命中归属推断（评审修正）**：云侧只回 `hit_tokens` 数量，不回「哪层命中」。
+归属机制：把 `last_hit_block_tokens` 与各层 token 长度逐层累加比对——
+`hit_block_layer = max{ L | tokens(P0..PL) ≤ hit_tokens }`。因此
+`PrefixRecord` 必须存 `token_len[4]`（各层估算长度），Profiler 据此输出
+`hit_tokens_by_layer`。长度估算无需 tokenizer 精度；精确对齐留给阶段 C 的
+`PrefixTokenFingerprint`。
+
 **网关侧只读检测**：
 - 检测 system 块多余空白、工具顺序未排序、P4 噪声泄漏到前缀。
 - 打指标 `prefix_drift_detected_total{layer,reason}`。
@@ -140,6 +150,12 @@ P4 本轮输入     user 本轮 + 动态时间/request_id         不可缓存�
 - OpenAI：每 180–240s，且受 15 rpm 桶约束
 - 本地：按 KV 驱逐策略，更勤但低优先级
 
+**最坏场景预算（评审修正）**：TTL×0.45 提前预热时，预热请求本身按命中价
+计费（便宜）；但**迟到预热**（调度延迟/配额不足导致前缀已过期）= 全价
+prefill，单次成本可达数倍。2% 全局帽与 3% 租户帽必须按「全价 prefill」
+最坏场景测算，而不是按命中价测算。加 `warmup_late_total` 指标（预热响应
+中 `cached_tokens=0` 即计迟到）；迟到率高 → 调高预热提前量。
+
 **成本归属**：
 - P0 全局：平台
 - P1 租户：租户
@@ -155,6 +171,10 @@ P4 本轮输入     user 本轮 + 动态时间/request_id         不可缓存�
   - P2 命中低 + drift 高 → 项目块太杂
   - P3 很长但增量命中小 → 折叠策略需要调整
 - 历史折叠：最近 K 轮原文保留，更早的变成稳定模板摘要；摘要模板固定字段，禁止模型自由发挥；更新频率每 K 轮一次。
+- **折叠 = 一次 P3 级 cache break（评审修正）**：折叠瞬间旧 P3 原文块失效
+  （P0–P2 不受影响，仍命中）。预算它：折叠放低峰期；折叠后首请求 P3 段
+  miss 属预期，不计入 `miss_reason=routed_away`；摘要模板字段固定，保证
+  折叠后 P3 能重新滚雪球。
 - 敏感与合规：租户可声明 `cacheable: false`；PII 检测命中则不预热、不写 L0；亲和键含 `tenant_id` 禁止跨租户串缓存。
 
 ### 5.4 有界负载亲和路由（解决负载均衡 × 高命中）
@@ -217,6 +237,7 @@ PrefixRecord {
   req_count_window,
   hit_tokens, miss_tokens, input_tokens,
   last_hit_block_tokens,    // 云侧返回的 cached tokens
+  token_len[4],             // 各层估算 token 长度（命中归属推断用）
   drift_flags,
   warmup_eligible,
   cacheable,
@@ -235,13 +256,20 @@ QuotaBucket {
 
 续期：每次真实请求把 `bind_expire_at` 续到 `now + max(厂商TTL, 15min)`。
 
+**状态存储右规模化（评审修正）**：基线要求 Dragonfly/Redis，但当前单实例
+阶段应**先进程内表**——亲和表、Profiler、预热队列全部进程内，热指纹只做
+L1 缓存；`AffinityRing` / `PrefixStore` 接口预留 Redis 实现，多实例部署
+时才引入外部状态。避免阶段 B 一开始就背基础设施依赖。
+
 ---
 
 ## 8. 观测、指标与验收
 
 **关键指标**：
 
-- `prompt_cache_hit_rate`（业务，不含 warmup）：DeepSeek 目标 **稳定 ≥ 80%**，冲 96% 案例
+- `prompt_cache_hit_rate`（业务，不含 warmup）：DeepSeek **分阶段**——
+  B-1 观测先出基线 → 亲和后 50–60% → 再冲稳定 ≥ 80%（96% 是近全静态巨型
+  前缀的极端案例，不作首期目标）
 - `prompt_cache_hit_tokens` / `miss_tokens` 按 `layer`、`provider`、`tenant`
 - `cache_miss_reason{drift, routed_away, ttl, below_min, throttle, cold}`
 - `affinity_overflow_total` / `affinity_migrate_back_total`
@@ -254,7 +282,8 @@ QuotaBucket {
 
 | 指标 | 目标 |
 |------|------|
-| 业务 `prompt_cache_hit_rate` | DeepSeek ≥ 80%，15min 空闲不归零 |
+| 业务 `prompt_cache_hit_rate` | DeepSeek 分阶段：观测基线 → 50–60% → 80%+ |
+| 高价值前缀 15min 空闲 | 命中不归零（仅对热度 ≥ 阈值前缀验收，其余不预热） |
 | `miss_reason=routed_away` | 亲和上线后显著下降，作为回归门禁 |
 | 预热成本 | < 2% input tokens，单租户 < 3% 自身成本 |
 | 负载偏离 | 健康节点 ≤ 20%（排除冷启动/迁回窗口） |
@@ -335,6 +364,42 @@ Coordinator.Acquire(fp, kind=real|warm) -> ok
 ```
 
 规则层输出 `group` 后只调 `PickProvider`；节点层健康/权重继续复用现有池。
+
+---
+
+## 14. 配置形态（provider.yaml，评审补充）
+
+```yaml
+prefix:
+  enabled: true                     # 总开关（DM_GATEWAY_PREFIX=0 关闭）
+  fingerprint:
+    layers: [P0, P1, P2, P3]        # 参与指纹的层（P4 永不参与）
+  affinity:
+    vnodes_per_weight: 256          # 加权虚拟节点密度
+    overload_factor: 1.25           # 过载判定 c 值
+    recover_after: 2m               # 主节点健康恢复阈值 T_recover
+    migrate_back: [0.10, 0.30, 0.70, 1.00]  # 迁回流量分数阶梯
+    osc_suppress: 10m               # 同前缀迁回最小间隔
+  warmup:
+    enabled: true                   # DM_GATEWAY_PREFIX_WARMUP=0 关闭
+    trigger_req: 10                 # 近15min req_count ≥ N
+    trigger_hit_tokens: 100000      # 或 hit_tokens 累计 ≥ H
+    idle_ratio: 0.45                # 空闲 ≥ TTL * ratio 触发预热
+    tail_token: "."                 # P4 固定 1 token 尾巴
+    global_cap_ratio: 0.02          # 预热 input / 全站 input
+    tenant_cap_ratio: 0.03          # 单租户预热 / 自身真实 input
+    budget_by: full_price           # 帽按最坏场景（全价 prefill）测算
+  l0_ttl:
+    hot: 30m                        # 高价值前缀
+    normal: 5m                      # 默认
+    cold: 60s                       # 低价值 / 强动态 P4
+  profiler:
+    window: 15m
+    store: memory                   # memory | redis（多实例再启用）
+```
+
+> 所有值走 provider.yaml + 环境变量覆盖，热更新随 watcher 生效；
+> 默认全关（`enabled: false`），阶段 B 按模块逐个打开并消融。
 
 ---
 
