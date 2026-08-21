@@ -21,9 +21,6 @@
 .DS_Store
 Thumbs.db
 
-# Cache
-cache/
-
 # Environment
 .env
 *.env

@@ -100,6 +100,14 @@
   `miss_reason=routed_away` 显著下降。
 
 ### 2.3 B-3 固化前缀（DialogMesh 编译器）
+
+> ✅ 2026-08-22 编译器侧已实现（DialogMesh）: `compiler/prefix_layout.py`
+> （strip_volatile / normalize_stable_prefix / stable_fingerprint /
+> tool_defs_sorted）+ golden 测试 5 例（同逻辑上下文 0 漂移）+ 契约文档
+> `docs/only/recall/PREFIX_CONTRACT_20260822.md` + llm_reply 接线
+> （DM_PREFIX_STABILIZE=1 启用, 默认关）。待办: 历史折叠器、P1/P2 分层、
+> 工具排序生产接线、网关 drift 检测埋点。
+
 - 块顺序契约（P0→P3 只追加不重排）+ 去噪（时间戳/uuid 进 P4）。
 - 历史折叠（K 轮摘要模板固定）。
 - 网关 drift 检测 + `prefix_drift_detected_total`。
@@ -121,6 +129,11 @@
   命中不归零。
 
 ### 2.5 B-5 L0 分层 TTL + 预热禁写（依赖 D1）
+
+> ✅ 2026-08-22 已实现: cache.SetWithTTL（per-entry TTL）+ 容量 1000→5000
+> + server cacheTTL（Profiler 热前缀 30min / 普通 5min）+ 预热不经 HTTP 层
+> 天然禁写 L0; cache 单测 3 例。待办: cold 60s/不缓存档位、流式写 L0 策略。
+
 - 分层 TTL（hot 30m / normal 5m / cold 60s）；warmup 禁写 L0。
 - 与 0.1-C coalescer 共用 L0 子系统。
 

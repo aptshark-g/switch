@@ -120,7 +120,7 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		limiter:     limiter,
 		metrics:     observability.NewRegistry(),
 		logger:      observability.NewStructuredLogger(),
-		cache:       cache.New(1000, 5*time.Minute),
+		cache:       cache.New(5000, 5*time.Minute),
 		watcher:     watcher,
 		authCfg:     authCfg,
 		store:       store,
@@ -587,13 +587,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+			tree := prefix.FingerprintRequest(&req)
 			if resp.Usage != nil {
 				s.metrics.RecordTokensFull(providerName,
 					resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
 					resp.Usage.Cached(), resp.Usage.CachedMiss())
 				s.recordUsage(providerName, req.Model, resp.Usage, r)
 				// B-1 前缀命中观测（仅执行者记一次; 等待者共享结果不重复）。
-				tree := prefix.FingerprintRequest(&req)
 				if s.warmup != nil {
 					// B-4: 存 tenant + 预热载荷（warmup 启用时才存内容）。
 					s.prefixProfiler.ObserveFull(tree,
@@ -604,7 +604,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						resp.Usage.Cached(), resp.Usage.CachedMiss())
 				}
 			}
-			s.cache.Set(cacheKey, resp)
+			// B-5 分层 TTL: 高价值前缀 30min, 普通 5min（D1 设计）。
+			s.cache.SetWithTTL(cacheKey, resp, s.cacheTTL(tree.FP))
 			return resp, nil
 		}, 120*time.Second)
 		if cErr != nil {
@@ -632,6 +633,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 不可达：非流式路径已在上面 return。
 	writeJSON(w, http.StatusInternalServerError, map[string]string{
 		"error": "unreachable", "code": "UNKNOWN_ERROR"})
+}
+
+func (s *Server) cacheTTL(fp string) time.Duration {
+	if s.prefixProfiler != nil && s.prefixProfiler.IsHot(fp, 10) {
+		return 30 * time.Minute
+	}
+	return 5 * time.Minute
 }
 
 func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req *provider.GenerateRequest, exclude string) bool {
