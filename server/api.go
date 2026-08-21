@@ -87,16 +87,18 @@ type Server struct {
 	keyLimiter *provider.MultiRateLimiter
 	// 请求合并（2026-08-21 接线）: 同 cacheKey 并发只打一次上游。
 	// cache.Coalescer 此前孤儿 — README 宣称「请求合并」但从未接入。
-	coalescer *cache.Coalescer
+	coalescer      *cache.Coalescer
 	prefixProfiler *prefix.Profiler
 	// SLO burn-rate 告警（2026-08-21 接线）: 此前孤儿, 现由
 	// MetricsMiddleware 喂成功/失败, 超阈值触发 onAlert。
 	slo *observability.SLOMonitor
 	// B-2 有界负载亲和路由（2026-08-22）: 池内加权回落的"加权随机"
 	// 升级为 一致哈希亲和(FP+tenant) + 过载溢出。DM_GATEWAY_AFFINITY=1 启用。
-	affinity *prefix.AffinityRouter
+	affinity    *prefix.AffinityRouter
 	affinitySig string // 环签名（eligible 集合变化才重建）
 	affinityMu  sync.Mutex
+	// B-4 心跳预热（2026-08-22）: DM_GATEWAY_PREFIX_WARMUP=1 启用（需亲和）。
+	warmup *prefix.WarmScheduler
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -130,18 +132,82 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 			}
 			return "usage_log.jsonl"
 		}()),
-		keyLimiter: newKeyLimiterFromEnv(),
-		coalescer:  cache.NewCoalescer(),
+		keyLimiter:     newKeyLimiterFromEnv(),
+		coalescer:      cache.NewCoalescer(),
 		prefixProfiler: prefix.NewProfiler(),
-		slo: observability.NewSLOMonitor(observability.DefaultSLOConfig()),
-		affinity: newAffinityFromEnv(),
+		slo:            observability.NewSLOMonitor(observability.DefaultSLOConfig()),
+		affinity:       newAffinityFromEnv(),
 	}
 	s.slo.OnAlert(func(a observability.SLOAlert) {
 		log.Printf("SLO ALERT [%s] burn_rate=%.2f error_rate=%.3f budget_remaining=%.3f",
 			a.Level, a.BurnRate, a.ErrorRate, a.BudgetRemaining)
 	})
+	s.warmup = newWarmupFromEnv(s)
+	if s.warmup != nil {
+		interval := 30 * time.Second
+		if v := os.Getenv("DM_GATEWAY_WARMUP_INTERVAL"); v != "" {
+			var sec int
+			if _, err := fmt.Sscanf(v, "%d", &sec); err == nil && sec > 0 {
+				interval = time.Duration(sec) * time.Second
+			}
+		}
+		s.warmup.Start(interval)
+		log.Printf("warmup: enabled (interval=%s, trigger_req>=%d)",
+			interval, s.warmup.TriggerReq())
+	}
 	s.routes()
 	return s
+}
+
+// newWarmupFromEnv B-4 预热调度（默认关闭; 需 DM_GATEWAY_AFFINITY=1）。
+func newWarmupFromEnv(s *Server) *prefix.WarmScheduler {
+	if os.Getenv("DM_GATEWAY_PREFIX_WARMUP") != "1" {
+		return nil
+	}
+	if s.affinity == nil {
+		log.Printf("warmup: disabled — 需先 DM_GATEWAY_AFFINITY=1")
+		return nil
+	}
+	cfg := prefix.WarmupConfig{
+		Enabled:          true,
+		TriggerReq:       10,
+		TriggerHitTokens: 100000,
+		IdleAfter:        135 * time.Second, // DeepSeek TTL 300s × 0.45
+		TailToken:        ".",
+		GlobalCapRatio:   0.02,
+		MaxWarmPerTick:   20,
+	}
+	if v := os.Getenv("DM_GATEWAY_WARMUP_TRIGGER_REQ"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			cfg.TriggerReq = int64(n)
+		}
+	}
+	if v := os.Getenv("DM_GATEWAY_WARMUP_IDLE"); v != "" {
+		var sec int
+		if _, err := fmt.Sscanf(v, "%d", &sec); err == nil && sec > 0 {
+			cfg.IdleAfter = time.Duration(sec) * time.Second
+		}
+	}
+	quota := prefix.NewQuotaCoordinator(30, 0.30)
+	return prefix.NewWarmScheduler(cfg, s.prefixProfiler, quota,
+		func(fp, tenant string) string {
+			if s.affinity == nil {
+				return ""
+			}
+			p, _ := s.affinity.Decide(fp+":"+tenant, s.affinityHealthy)
+			return p
+		},
+		func(providerName string, req *provider.GenerateRequest) (*provider.GenerateResponse, error) {
+			return s.manager.Generate(context.Background(), providerName, req)
+		},
+		func() int64 {
+			var total int64
+			for _, v := range s.metrics.Snapshot().TokensPrompt {
+				total += v
+			}
+			return total
+		})
 }
 
 // newAffinityFromEnv B-2 亲和路由（默认关闭, DM_GATEWAY_AFFINITY=1 启用）。
@@ -361,6 +427,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if s.affinity != nil {
 		out["affinity"] = s.affinity.Snapshot()
 	}
+	if s.warmup != nil {
+		out["warmup"] = s.warmup.Counters()
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -471,6 +540,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// B-4: 真实请求优先于预热（QuotaCoordinator 扣 token, 预热只用余量）。
+	if s.warmup != nil && s.warmup.Quota() != nil {
+		s.warmup.Quota().RealRequest(providerName, prefix.FingerprintRequest(&req).FP)
+	}
 	// per-key 日配额（2026-08-13）: DM_GATEWAY_KEY_QUOTA_DAILY（token/天,
 	// 0=不限）。按 auth key 当日已用 token 判定, 超限 429 + BUDGET_EXCEEDED。
 	if q := os.Getenv("DM_GATEWAY_KEY_QUOTA_DAILY"); q != "" &&
@@ -520,8 +593,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					resp.Usage.Cached(), resp.Usage.CachedMiss())
 				s.recordUsage(providerName, req.Model, resp.Usage, r)
 				// B-1 前缀命中观测（仅执行者记一次; 等待者共享结果不重复）。
-				s.prefixProfiler.Observe(prefix.FingerprintRequest(&req),
-					resp.Usage.Cached(), resp.Usage.CachedMiss())
+				tree := prefix.FingerprintRequest(&req)
+				if s.warmup != nil {
+					// B-4: 存 tenant + 预热载荷（warmup 启用时才存内容）。
+					s.prefixProfiler.ObserveFull(tree,
+						resp.Usage.Cached(), resp.Usage.CachedMiss(),
+						apiKey, req.Messages)
+				} else {
+					s.prefixProfiler.Observe(tree,
+						resp.Usage.Cached(), resp.Usage.CachedMiss())
+				}
 			}
 			s.cache.Set(cacheKey, resp)
 			return resp, nil

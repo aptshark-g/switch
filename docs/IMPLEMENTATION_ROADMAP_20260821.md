@@ -106,6 +106,14 @@
 - 跨仓协调：DialogMesh 编译器 golden 测试（0 漂移）。
 
 ### 2.4 B-4 WarmScheduler + QuotaCoordinator
+
+> ✅ 2026-08-22 已实现（prefix/warmup.go + prefix/quota.go + server 接线）:
+> WarmScheduler（热度×空闲×配额触发; 复用最后消息前缀 + 固定尾巴, max_tokens=1;
+> 只预热亲和节点; 迟到预热 cached=0 → warm_late 计数; 全局 2% 帽按全价测算）;
+> QuotaCoordinator（每 provider|fp 令牌桶, 真实请求优先, 预热只用余量 >30%）;
+> DM_GATEWAY_PREFIX_WARMUP=1 启用（需亲和）; 6+2 单测; /v1/stats warmup 计数。
+> 待办: 预热成本归属分层（P0 平台/P1-P3 租户, 当前平台口径）; Redis 预热队列。
+
 - `prefix/warmup.go`：触发（热度×空闲×配额）、`X-DM-Warmup: 1`、
   迟到预热统计、只打亲和节点、双帽（全局 2% / 租户 3%，按全价测算）。
 - `prefix/quota.go`：per-prefix 令牌桶（OpenAI 15 rpm 约束），真实优先。
