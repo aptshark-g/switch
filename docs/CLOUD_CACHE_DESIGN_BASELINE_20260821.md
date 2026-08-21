@@ -450,6 +450,18 @@ prefix:
 数据同步参考 `litellm/model_prices_and_context_window.json` +
 `RightNow-AI/inference-cost-truth`，入库时带 source/检索日期）：
 
+**数据源分工（评审确认，2026-08-21）**：
+
+| 数据 | 来源 | 方式 |
+|------|------|------|
+| 价格（input/output/cache_read/cache_creation） | **LiteLLM `model_prices_and_context_window.json`**（3055 模型，社区维护，MIT，近实时） | 现有 `api_gateway.py` 价格同步（24h 后台拉取 + 手动 POST；2026-08-21 起提取 cache_read/cache_creation + 版本 diff） |
+| 机制参数（TTL/min prefix/per-prefix rpm/存储费/exempt-tpm） | **LiteLLM 没有**——自维护 provider.yaml `caching:` 块 | 来源 = 厂商官方文档 + 社区分析（`docs/业务.txt`），带 source/日期注释 |
+| 验证基准 | `RightNow-AI/inference-cost-truth`（874 验证行） | 人工抽查/发版前核对 |
+
+> 结论：价格直接复制 LiteLLM（MIT + 已实现）；机制参数必须自维护，因为
+> 它是「缓存机制手册」不是「定价目录」。变更可见性 = sync 的 `diff`
+> 输出（added/removed/price_changed/cache_price_changed）。
+
 ```yaml
 providers:
   deepseek:
