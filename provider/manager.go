@@ -94,6 +94,11 @@ func (m *Manager) Register(cfg ProviderConfig) (Provider, error) {
 	}
 	m.ratelimiters[cfg.Name] = NewProviderRateLimiter(cfg.RateLimitRPM, cfg.RateLimitTPM)
 	m.retryBudgets[cfg.Name] = NewRetryBudget(cfg.RetryBudget)
+	// 2026-08-21: RetryBudget 接线（此前创建后从未消费）— 同锁内注入
+	// provider, 连接重试前 TryConsume, 超预算直接失败防重试风暴。
+	if rbSetter, ok := p.(interface{ SetRetryBudget(*RetryBudget) }); ok {
+		rbSetter.SetRetryBudget(m.retryBudgets[cfg.Name])
+	}
 	log.Printf("manager: registered provider %q (kind=%s)", cfg.Name, cfg.Kind)
 	return p, nil
 }
@@ -162,7 +167,7 @@ func (m *Manager) Generate(ctx context.Context, name string, req *GenerateReques
 	cb := m.circuits[name]
 	m.mu.RUnlock()
 	if sem != nil { if err := sem.Acquire(ctx); err != nil { return nil, err }; defer sem.Release() }
-	if rl != nil { if !rl.Allow(tokenEstimate(req)) { return nil, fmt.Errorf("rate limit exceeded for %s", name) } }
+	if rl != nil { if !rl.Allow(TokenEstimate(req)) { return nil, fmt.Errorf("rate limit exceeded for %s", name) } }
 	if cb != nil { if !cb.Allow() { return nil, fmt.Errorf("circuit open for %s", name) }; t0 := time.Now(); resp, err := p.Generate(ctx, req); cb.Record(err, time.Since(t0)); return resp, err }
 	return p.Generate(ctx, req)
 }
@@ -194,10 +199,10 @@ func (m *Manager) Diagnostics() map[string]any {
 	return map[string]any{"providers": providers}
 }
 
-// tokenEstimate estimates token count for rate limiting.
-// Uses ~4 chars/token for English as a reasonable default.
-// For better accuracy, models with different encodings may adjust.
-func tokenEstimate(req *GenerateRequest) int {
+// TokenEstimate estimates token count for rate limiting.
+// Uses ~4 chars/token as a reasonable default (2026-08-21: 导出供 server
+// 多级限流复用 — MultiRateLimiter 此前孤儿, 接线后共用同一估算口径）。
+func TokenEstimate(req *GenerateRequest) int {
 	n := 0
 	for _, msg := range req.Messages {
 		n += len(msg.Content)

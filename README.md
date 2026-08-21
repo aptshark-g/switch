@@ -34,10 +34,10 @@ Groq / OpenRouter / LM Studio / Ollama）, 一套 OpenAI 兼容接口同时对�
 | 🛡️ **三层保护** | 信号量 → 速率限制 → 滑动窗口断路器 |
 | ⚡ **自适应并发** | Gradient2 算法, 根据延迟梯度动态调整 |
 | 🎯 **智能路由** | 意图/复杂度规则层（X-Intent + X-Complexity → routing.rules, cortiq-gateway/leyline 模式）+ 池内加权随机（priority 分层 × weight × health × latency × cost, 2026-08-21 实测） |
-| 🔗 **请求合并** | 同 key 并发请求 → 1 次上游调用 |
+| 🔗 **请求合并** | 同 cacheKey 并发请求 → 1 次上游调用（2026-08-21 接线） |
 | 📊 **诊断端点** | /v1/diagnostics — 每个 Provider 的 key/base_url/circuit 状态 |
 | 🔄 **热重载** | 5s 轮询 provider.yaml + Admin API |
-| 📈 **SLO 燃烧率** | 短窗口(1h) + 长窗口(6h) 双检测 |
+| 🔧 **SLO 燃烧率** | 实验组件（计算器已实现, 告警接线中） |
 | 🔁 **流式聚合** | SSE tool_call 按 index 合并碎片/空 arguments（空回复根因修复） |
 | 💰 **计费持久化** | CostTracker JSONL 落盘 + 重放, per-key / per-model 精细化分摊 |
 | 🔑 **per-key 配额** | 租户级 token 配额 + 每日用量 |

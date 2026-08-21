@@ -10,9 +10,9 @@ import (
 // MultiRateLimiter enforces rate limits at three levels.
 // Any level exhausted → request rejected.
 type MultiRateLimiter struct {
-	mu         sync.Mutex
-	perKey    map[string]*tokenBucket
-	perModel   map[string]*tokenBucket
+	mu          sync.Mutex
+	perKey      map[string]*tokenBucket
+	perModel    map[string]*tokenBucket
 	perProvider *tokenBucket
 }
 
@@ -53,6 +53,38 @@ func (mrl *MultiRateLimiter) SetKeyLimit(key string, rpm, tpm int) {
 func (mrl *MultiRateLimiter) SetModelLimit(model string, rpm, tpm int) {
 	mrl.mu.Lock(); defer mrl.mu.Unlock()
 	mrl.perModel[model] = newBucket(rpm, tpm)
+}
+
+// ClearKeyLimit removes a per-API-key limit (2026-08-21 admin 接线).
+func (mrl *MultiRateLimiter) ClearKeyLimit(key string) {
+	mrl.mu.Lock(); defer mrl.mu.Unlock()
+	delete(mrl.perKey, key)
+}
+
+// ClearModelLimit removes a per-model limit (2026-08-21 admin 接线).
+func (mrl *MultiRateLimiter) ClearModelLimit(model string) {
+	mrl.mu.Lock(); defer mrl.mu.Unlock()
+	delete(mrl.perModel, model)
+}
+
+// KeyLimits snapshots per-key limits as name → [rpm, tpm] (admin 展示)。
+func (mrl *MultiRateLimiter) KeyLimits() map[string][2]int {
+	mrl.mu.Lock(); defer mrl.mu.Unlock()
+	out := make(map[string][2]int, len(mrl.perKey))
+	for k, b := range mrl.perKey {
+		out[k] = [2]int{int(b.rpm), int(b.tpm)}
+	}
+	return out
+}
+
+// ModelLimits snapshots per-model limits as name → [rpm, tpm]。
+func (mrl *MultiRateLimiter) ModelLimits() map[string][2]int {
+	mrl.mu.Lock(); defer mrl.mu.Unlock()
+	out := make(map[string][2]int, len(mrl.perModel))
+	for k, b := range mrl.perModel {
+		out[k] = [2]int{int(b.rpm), int(b.tpm)}
+	}
+	return out
 }
 
 // Allow checks all three levels. tokenCount is the estimated tokens for this request.

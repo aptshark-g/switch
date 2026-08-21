@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -132,4 +133,21 @@ func (s *Server) getRoutingProvider() string {
 	// 2026-08-21: 原"首个匹配" → 智能加权随机（priority 分层 × weight ×
 	// health × latency × cost; 熔断 OPEN 不进首选）。
 	return s.selectFromPool()
+}
+
+// handlePrefixStats B-1 前缀命中观测端点（TopN 按 hit_tokens 排序）。
+func (s *Server) handlePrefixStats(w http.ResponseWriter, r *http.Request) {
+	n := 20
+	if v := r.URL.Query().Get("top"); v != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(v, "%d", &parsed); err == nil &&
+			parsed > 0 && parsed <= 200 {
+			n = parsed
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tracked_prefixes": s.prefixProfiler.Size(),
+		"window_minutes":   15,
+		"top":              s.prefixProfiler.Top(n),
+	})
 }

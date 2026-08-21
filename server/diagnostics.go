@@ -60,6 +60,8 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"providers":         diags,
 		"routing_strategy":  "weighted_random",
 		"routing_rules":     s.routingRules,
+		"prefix_tracked":    s.prefixProfiler.Size(),
+		"coalescer_pending": s.coalescer.Pending(),
 		"problems_detected": problemCount,
 		"uptime_seconds":    s.metrics.Uptime(),
 		"go_version":        runtime.Version(),

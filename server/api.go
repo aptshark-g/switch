@@ -16,6 +16,7 @@ import (
 	"github.com/aptshark/gateway/config"
 	"github.com/aptshark/gateway/observability"
 	"github.com/aptshark/gateway/persistence"
+	"github.com/aptshark/gateway/prefix"
 	"github.com/aptshark/gateway/provider"
 	"github.com/aptshark/gateway/stream"
 )
@@ -81,6 +82,13 @@ type Server struct {
 	// 计费跟踪（2026-08-13 接线）: CostTracker 此前孤儿 — 生产从不调用。
 	// 成功请求按 provider pricing 计费, /v1/usage 聚合展示。
 	costs *provider.CostTracker
+	// 多级限流（2026-08-21 接线）: per-key/per-model RPM-TPM。
+	// MultiRateLimiter 此前孤儿; provider 层由 manager 现有限流负责。
+	keyLimiter *provider.MultiRateLimiter
+	// 请求合并（2026-08-21 接线）: 同 cacheKey 并发只打一次上游。
+	// cache.Coalescer 此前孤儿 — README 宣称「请求合并」但从未接入。
+	coalescer *cache.Coalescer
+	prefixProfiler *prefix.Profiler
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -114,6 +122,9 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 			}
 			return "usage_log.jsonl"
 		}()),
+		keyLimiter: newKeyLimiterFromEnv(),
+		coalescer:  cache.NewCoalescer(),
+		prefixProfiler: prefix.NewProfiler(),
 	}
 	s.routes()
 	return s
@@ -172,6 +183,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/admin/providers", s.handleAdminProviders)
 	s.mux.HandleFunc("/v1/diagnostics", s.handleDiagnostics)
 	s.mux.HandleFunc("/v1/admin/routing", s.handleRoutingPool)
+	s.mux.HandleFunc("/v1/admin/ratelimit", s.handleAdminRateLimit)
+	s.mux.HandleFunc("/v1/prefix/stats", s.handlePrefixStats)
 	s.mux.HandleFunc("/v1/admin/providers/", s.handleAdminProviders)
 }
 
@@ -385,6 +398,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 多级限流（2026-08-21 接线）: per-key/per-model RPM-TPM。
+	if ok, reason := s.checkKeyLimits(r, req.Model, provider.TokenEstimate(&req)); !ok {
+		s.metrics.RateLimitHits.Inc()
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error":    "rate limit exceeded",
+			"code":     "RATE_LIMITED",
+			"reason":   reason,
+			"provider": providerName,
+		})
+		return
+	}
 	// per-key 日配额（2026-08-13）: DM_GATEWAY_KEY_QUOTA_DAILY（token/天,
 	// 0=不限）。按 auth key 当日已用 token 判定, 超限 429 + BUDGET_EXCEEDED。
 	if q := os.Getenv("DM_GATEWAY_KEY_QUOTA_DAILY"); q != "" &&
@@ -421,40 +445,50 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.metrics.CacheMisses.Inc()
+		// 请求合并（2026-08-21）: 同 cacheKey 并发请求只执行一次上游,
+		// 其余等待共享结果（coalescer 超时只约束等待者, 执行者跑完）。
+		v, cErr := s.coalescer.Do(cacheKey, func() (any, error) {
+			resp, err := s.manager.Generate(r.Context(), providerName, &req)
+			if err != nil {
+				return nil, err
+			}
+			if resp.Usage != nil {
+				s.metrics.RecordTokensFull(providerName,
+					resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
+					resp.Usage.Cached(), resp.Usage.CachedMiss())
+				s.recordUsage(providerName, req.Model, resp.Usage, r)
+				// B-1 前缀命中观测（仅执行者记一次; 等待者共享结果不重复）。
+				s.prefixProfiler.Observe(prefix.FingerprintRequest(&req),
+					resp.Usage.Cached(), resp.Usage.CachedMiss())
+			}
+			s.cache.Set(cacheKey, resp)
+			return resp, nil
+		}, 120*time.Second)
+		if cErr != nil {
+			err := cErr
+			gw := provider.ClassifyError(providerName, err, 0)
+			log.Printf("gateway: generate error [%s] %s: %v", providerName, gw.Kind, err)
+			if gw.Kind.Retryable() {
+				if s.gracefulDegradation(w, r, &req, providerName) {
+					return
+				}
+			}
+			writeJSON(w, gw.Kind.HTTPStatus(), map[string]string{
+				"error": gw.Message, "kind": gw.Kind.String(),
+				"code": gw.Code(), "provider": providerName,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+		return
 	}
 	if req.Stream {
 		s.handleStream(w, r, providerName, &req)
 		return
 	}
-	resp, err := s.manager.Generate(r.Context(), providerName, &req)
-	if err != nil {
-		gw := provider.ClassifyError(providerName, err, 0)
-		log.Printf("gateway: generate error [%s] %s: %v", providerName, gw.Kind, err)
-		if gw.Kind.Retryable() {
-			if s.gracefulDegradation(w, r, &req, providerName) {
-				return
-			}
-		}
-		writeJSON(w, gw.Kind.HTTPStatus(), map[string]string{
-			"error": gw.Message, "kind": gw.Kind.String(),
-			"code": gw.Code(), "provider": providerName,
-		})
-		return
-	}
-	if resp.Usage != nil {
-		s.metrics.RecordTokensFull(providerName,
-			resp.Usage.PromptTokens, resp.Usage.CompletionTokens,
-			resp.Usage.Cached(), resp.Usage.CachedMiss())
-		s.recordUsage(providerName, req.Model, resp.Usage, r)
-	}
-	apiKey := "anon"
-	if h := r.Header.Get("Authorization"); len(h) > 7 {
-		apiKey = h[7:]
-	}
-	cacheKey := cache.HashKey(requestCacheKey(req),
-		providerName+"|"+req.Model+"|"+apiKey+"|"+r.Header.Get("X-Context-Hash"))
-	s.cache.Set(cacheKey, resp)
-	writeJSON(w, http.StatusOK, resp)
+	// 不可达：非流式路径已在上面 return。
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error": "unreachable", "code": "UNKNOWN_ERROR"})
 }
 
 func (s *Server) gracefulDegradation(w http.ResponseWriter, r *http.Request, req *provider.GenerateRequest, exclude string) bool {

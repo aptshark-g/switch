@@ -21,9 +21,13 @@ import (
 // This covers OpenAI, DeepSeek, Kimi, Groq, vLLM, Ollama, and any
 // proxy that speaks the /v1/chat/completions protocol.
 type OpenAIProvider struct {
-	cfg    ProviderConfig
-	client *http.Client
+	cfg         ProviderConfig
+	client      *http.Client
+	retryBudget *RetryBudget // 2026-08-21: 防重试风暴（Manager 注入, 之前孤儿）
 }
+
+// SetRetryBudget injects the per-provider retry budget (called by Manager).
+func (p *OpenAIProvider) SetRetryBudget(rb *RetryBudget) { p.retryBudget = rb }
 
 // NewOpenAIProvider constructs an OpenAIProvider from the given config.
 func NewOpenAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
@@ -173,7 +177,7 @@ func (p *OpenAIProvider) GenerateStream(ctx context.Context, req *GenerateReques
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		if attempt+1 < attempts {
+		if attempt+1 < attempts && (p.retryBudget == nil || p.retryBudget.TryConsume()) {
 			backoff := time.Duration(300*(1<<attempt)) * time.Millisecond
 			backoff += time.Duration(rand.Intn(150)) * time.Millisecond
 			select {
