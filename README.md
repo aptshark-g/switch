@@ -26,6 +26,20 @@ Groq / OpenRouter / LM Studio / Ollama）, 一套 OpenAI 兼容接口同时对�
 
 ---
 
+## 📚 文档导航
+
+| 文档 | 内容 |
+|------|------|
+| [架构总览（2026-08-22）](docs/ARCHITECTURE_20260822.md) | 请求流/智能路由/前缀缓存/可靠性/观测 全图 + 模块/配置/端点清单 |
+| [设计基线 v1.2](docs/CLOUD_CACHE_DESIGN_BASELINE_20260821.md) | 云厂商上下文缓存全量设计（固化前缀/预热/滚雪球/亲和） |
+| [实现路线图](docs/IMPLEMENTATION_ROADMAP_20260821.md) | 阶段 0/1/2/3 任务与完成状态 |
+| [生产级差距审计](docs/PRODUCTION_GAP_AUDIT_20260821.md) | 宣称 vs 实现核查 + LiteLLM 对照 + P0/P1/P2 |
+| [压测报告](docs/BENCH_20260820.md) | 2026-08-20 性能实测（缓存/未命中/流式/错误注入） |
+| [网关设计演进](docs/BUSINESS_CHAIN_01_GATEWAY.md) | 网关能力演进与 P1 设计 |
+| [DialogMesh 绑定](docs/BINDING_DIALOGMESH.md) | 与 DialogMesh 的接线设计 |
+
+---
+
 ## 功能
 
 | 能力 | 说明 |
