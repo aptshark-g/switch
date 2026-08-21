@@ -89,6 +89,9 @@ type Server struct {
 	// cache.Coalescer 此前孤儿 — README 宣称「请求合并」但从未接入。
 	coalescer *cache.Coalescer
 	prefixProfiler *prefix.Profiler
+	// SLO burn-rate 告警（2026-08-21 接线）: 此前孤儿, 现由
+	// MetricsMiddleware 喂成功/失败, 超阈值触发 onAlert。
+	slo *observability.SLOMonitor
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -125,7 +128,12 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		keyLimiter: newKeyLimiterFromEnv(),
 		coalescer:  cache.NewCoalescer(),
 		prefixProfiler: prefix.NewProfiler(),
+		slo: observability.NewSLOMonitor(observability.DefaultSLOConfig()),
 	}
+	s.slo.OnAlert(func(a observability.SLOAlert) {
+		log.Printf("SLO ALERT [%s] burn_rate=%.2f error_rate=%.3f budget_remaining=%.3f",
+			a.Level, a.BurnRate, a.ErrorRate, a.BudgetRemaining)
+	})
 	s.routes()
 	return s
 }
@@ -191,7 +199,7 @@ func (s *Server) routes() {
 func (s *Server) BuildHandler() http.Handler {
 	return LoadSheddingMiddleware(s.shedder)(
 		observability.TracingMiddleware(
-			observability.MetricsMiddleware(s.metrics, s.logger)(
+			observability.MetricsMiddleware(s.metrics, s.logger, s.slo)(
 				CORSMiddleware(
 					panicRecoveryMiddleware(
 						// 2026-08-20: 移除冗余 LoggingMiddleware —— 每请求日志
@@ -303,7 +311,26 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.metrics.Snapshot())
+	var out map[string]any
+	if raw, err := json.Marshal(s.metrics.Snapshot()); err == nil {
+		_ = json.Unmarshal(raw, &out)
+	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	// SLO burn-rate（2026-08-21 接线）
+	if s.slo != nil {
+		snap := s.slo.Snapshot()
+		out["slo"] = map[string]any{
+			"burn_rate":        snap.BurnRate,
+			"error_rate":       snap.ErrorRate,
+			"short_rate":       snap.ShortRate,
+			"long_rate":        snap.LongRate,
+			"budget_remaining": snap.BudgetRemaining,
+			"alert_level":      snap.Level.String(),
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {

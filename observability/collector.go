@@ -119,7 +119,8 @@ func GetRequestID(ctx context.Context) string {
 // ---------------------------------------------------------------------------
 
 // MetricsMiddleware wraps an http.Handler to collect metrics and structured logs.
-func MetricsMiddleware(reg *Registry, logger *StructuredLogger) func(http.Handler) http.Handler {
+// slo（可 nil）接线 2026-08-21: 5xx 计失败、其余计成功, 喂 burn-rate 告警。
+func MetricsMiddleware(reg *Registry, logger *StructuredLogger, slo *SLOMonitor) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			reqID := NewRequestID()
@@ -134,6 +135,14 @@ func MetricsMiddleware(reg *Registry, logger *StructuredLogger) func(http.Handle
 			wr := &responseWrapper{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(wr, r)
+
+			if slo != nil {
+				if wr.status >= 500 {
+					slo.RecordFailure()
+				} else {
+					slo.RecordSuccess()
+				}
+			}
 
 			elapsed := time.Since(start).Seconds() * 1000 // ms
 			provider := r.URL.Query().Get("provider")

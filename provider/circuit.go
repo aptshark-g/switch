@@ -62,9 +62,18 @@ func NewCircuitBreaker(name string) *CircuitBreaker {
 
 // NewCircuitBreakerWithConfig creates a circuit breaker with custom config.
 func NewCircuitBreakerWithConfig(name string, cfg CircuitBreakerConfig) *CircuitBreaker {
-	if cfg.NumBuckets <= 0 { cfg.NumBuckets = 10 }
-	if cfg.MinCallsBeforeEvaluation <= 0 { cfg.MinCallsBeforeEvaluation = 5 }
-	if len(cfg.HalfOpenPermits) == 0 { cfg.HalfOpenPermits = []int{1, 3, 10} }
+	// 2026-08-21 修复: 部分配置时缺省字段必须落默认值 — 此前
+	// SlowCallRateThreshold/SlowCallDurationThreshold 等为零值 →
+	// 任意耗时都算慢调用、任意失败率都熔断（全成功也误开, 单测暴露）。
+	d := DefaultCircuitBreakerConfig()
+	if cfg.WindowSize <= 0 { cfg.WindowSize = d.WindowSize }
+	if cfg.NumBuckets <= 0 { cfg.NumBuckets = d.NumBuckets }
+	if cfg.FailureRateThreshold <= 0 { cfg.FailureRateThreshold = d.FailureRateThreshold }
+	if cfg.SlowCallRateThreshold <= 0 { cfg.SlowCallRateThreshold = d.SlowCallRateThreshold }
+	if cfg.SlowCallDurationThreshold <= 0 { cfg.SlowCallDurationThreshold = d.SlowCallDurationThreshold }
+	if cfg.WaitDurationInOpen <= 0 { cfg.WaitDurationInOpen = d.WaitDurationInOpen }
+	if len(cfg.HalfOpenPermits) == 0 { cfg.HalfOpenPermits = d.HalfOpenPermits }
+	if cfg.MinCallsBeforeEvaluation <= 0 { cfg.MinCallsBeforeEvaluation = d.MinCallsBeforeEvaluation }
 	return &CircuitBreaker{
 		cfg:          cfg,
 		name:         name,
@@ -186,6 +195,9 @@ func (cb *CircuitBreaker) transitionTo(newState CircuitState) {
 		cb.openedAt = time.Now()
 		// Reset window on open to avoid stale data poisoning half-open
 		cb.buckets = make([]cbBucket, cb.cfg.NumBuckets)
+	case CircuitClosed:
+		cb.buckets = make([]cbBucket, cb.cfg.NumBuckets)
+		cb.currentIdx = 0
 	case CircuitHalfOpen:
 		cb.halfOpenIdx = 0
 		cb.halfOpenNeed = cb.cfg.HalfOpenPermits[0]

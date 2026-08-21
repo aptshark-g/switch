@@ -57,6 +57,7 @@ type SLOMonitor struct {
 	// Current state
 	lastBurnRate float64
 	lastAlert    SLOAlertLevel
+	recordsSince int // 2026-08-21: 每 N 条记录评估（原实现按墙钟取模, 注释与实现不符且不可测）
 
 	// Callbacks
 	onAlert func(SLOAlert)
@@ -132,9 +133,10 @@ func (sm *SLOMonitor) record(success bool) {
 		sm.longBuckets[sm.longIdx].failures++
 	}
 
-	// Check burn rate every 30 records (approximate)
-	now := time.Now()
-	if now.Unix()%30 == 0 {
+	// Check burn rate every 30 records.
+	sm.recordsSince++
+	if sm.recordsSince >= 30 {
+		sm.recordsSince = 0
 		sm.evaluate()
 	}
 }
