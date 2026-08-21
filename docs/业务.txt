@@ -1,0 +1,323 @@
+  
+  
+   我帮你查了一圈，按**项目类型**给你分好类了。下面这些都是 GitHub 上有实际代码、文档或生产案例的，不是纯概念。
+
+---
+
+## 一、Kubernetes 原生 / 云原生推理调度框架（最贴近你的"网关+前缀缓存"场景）
+
+### 1. llm-d（IBM / Google / Red Hat 联合开源）
+- **GitHub**: https://github.com/llm-d/llm-d
+- **核心能力**: 基于 Kubernetes Gateway API Inference Extension (GAIE) 的 **KV Cache Aware Routing**，通过 External Processing Pod (EPP) 与 Envoy 集成，实时追踪 vLLM Pod 的 KV 缓存状态（BlockStored/BlockRemoved 事件），实现**精确前缀缓存路由**。
+- **关键组件**:
+  - `llm-d-router`: 智能入口，支持 standalone 和 gateway 两种模式
+  - `llm-d-kv-cache-manager`: 全局 KV 缓存索引，分片处理
+  - `Precise Prefix-Cache Scorer`: 计算每个 Pod 的缓存亲和分数，再结合负载分数做平衡决策
+- **生产数据**: Red Hat 博客报道最新达到 **87.4% 缓存命中率** 
+- **与你的设计的对应点**: 
+  - 它的 `cache-aware-router` 插件配置里的 `session_affinity` 和 `prefix-aware` 算法，跟你的"有界负载一致哈希 + 溢出迁回"思路非常接近
+  - 它的"write path"（vLLM Pod 通过 ZMQ 发布缓存事件）对应你的 Profiler 回写机制
+
+### 2. AIBrix（vLLM 生态官方项目）
+- **GitHub**: https://github.com/vllm-project/aibrix
+- **核心能力**: vLLM 生产栈的网关插件，支持 **Prefix Cache + Load-Aware Routing**。
+- **路由算法**:
+  - `prefix_cache`: 基于前缀树匹配
+  - `prefix_cache_preble`: 基于 Preble 论文的优化前缀调度（但有已知 bug，高并发长文本下会递归栈溢出，v0.5.0 有修复 PR）
+- **关键文件**: `pkg/plugins/gateway/algorithms/prefix_cache_preble.go`
+- **与你的设计的对应点**:
+  - AIBrix 的 `PrefixCache` 路由策略直接实现了"前缀亲和"，但缺少"有界负载"和"预热"机制，你的设计在这些点上更完整
+  - 它的 `MetadataStore` 抽象层对应你的 `PrefixStore` 接口（memory / redis 切换）
+
+### 3. vLLM Production Stack
+- **文档**: https://docs.vllm.ai/projects/production-stack/
+- **核心能力**: 官方生产部署指南，包含 **Prefix-Aware Routing** 和 **KV-Aware Routing** 两种模式。
+- **关键教程**:
+  - Prefix-aware routing: 基于请求内容前缀选择 replica
+  - KV-aware routing: 基于实际 KV 缓存状态选择 replica（需要 replica 上报状态）
+- **与你的设计的对应点**: 它的"session affinity + prefix caching"组合，对应你的"亲和层 + 前缀固化"思路
+
+---
+
+## 二、推理框架自带的路由/负载均衡（本地部署场景）
+
+### 4. SGLang（LMSYS / Berkeley）
+- **GitHub**: https://github.com/sgl-project/sglang
+- **核心能力**: 从 v0.4 开始内置 **Cache-Aware Load Balancer**。
+- **用法**:
+  - 单节点多 GPU: `--dp-size 2 --load-balance-method cache_aware`
+  - 多节点: 前置 `sgl-router`，配置 `cache_aware` 策略，基于前缀 hash 路由到同一 worker
+- **生产数据**: LMSYS 官方 benchmark 显示 **1.9× 吞吐提升，3.8× 缓存命中率提升** 
+- **最新进展** (2026-05): 正在推进 DP-attention 场景下的 `prefix_match` 负载均衡，解决单实例内多 DP rank 的前缀缓存打散问题 
+- **与你的设计的对应点**: SGLang 的 `cache_aware` 是"纯 hash 路由"，没有负载感知；你的"有界负载一致哈希 + 过载溢出"正好补上了这个缺口
+
+### 5. Ray Serve（Anyscale）
+- **文档**: https://docs.ray.io/en/latest/serve/llm/user-guides/prefix-aware-routing.html
+- **核心能力**: `PrefixCacheAffinityRouter`，基于字符级前缀树近似追踪各 replica 的缓存状态。
+- **生产数据**: 32B 模型上 **TTFT 降低 60%，端到端吞吐提升 40%** 
+- **实现细节**: 维护一个 character-level prefix tree，每次路由后插入请求内容并标记 replica；后续请求查询最长公共前缀。负载过高时 fallback 到 Power of Two Choices。
+- **与你的设计的对应点**: 它的"前缀树 + 负载 fallback"跟你的"指纹树 + 有界负载溢出"思路一致，但 Ray 的实现是字符级而非 token 级，精度较低
+
+### 6. vLLM（核心引擎）
+- **文档**: https://docs.vllm.ai/en/stable/design/prefix_caching/
+- **核心能力**: `--enable-prefix-caching` 开启 RadixAttention 前缀缓存，但**本身不做路由决策**，需要上层网关配合。
+- **关键配合**: 需要上层网关做 sticky routing / session affinity，否则分布式部署下前缀缓存会失效 
+
+---
+
+## 三、通用 AI Gateway / 代理（多云厂商场景）
+
+### 7. LiteLLM（最活跃的通用 LLM 代理）
+- **GitHub**: https://github.com/BerriAI/litellm
+- **核心能力**: 支持 100+ 厂商的统一接口，有 **Prompt Caching + Auto-Routing** 组合。
+- **关键发现** (2026-07 博客):
+  - **Auto-routing 不会破坏 prompt caching**: 99.3% 的模型切回时缓存仍热（1h TTL 场景）
+  - **后台预热不值得做**: 只有 4% 的缓存 miss 可通过后台预热避免，且对一般聊天场景反而让总成本增加 0.10% 
+  - 但对 agentic 长会话（~190k tokens 前缀），预热可省 0.9% 成本
+- **与你的设计的对应点**: LiteLLM 的实测数据直接支撑了你方案中"预热帽按最坏场景测算"和"分阶段目标"的合理性——预热不是银弹，需要严格配额控制
+
+### 8. Portkey（开源网关 + 托管控制平面）
+- **GitHub**: https://github.com/Portkey-AI/gateway
+- **核心能力**: MIT 协议开源，支持 simple cache 和 semantic cache，以及多模型路由、fallback、成本追踪。
+- **状态**: 2026 年被 Palo Alto Networks 收购，继续活跃开发。
+
+### 9. Kong AI Gateway
+- **核心能力**: 通过 AI Semantic Cache 插件做向量相似度缓存，支持 Redis 向量存储。
+- **限制**: 很多 AI 能力需要企业版许可。
+
+### 10. Apache APISIX + AI 插件
+- **博客/教程**: 有完整的"AI Gateway 降低 75% 成本"教程，展示如何用 APISIX 的 `proxy-cache` 和自定义 serverless 插件实现语义缓存。
+- **与你的设计的对应点**: 这属于 L0 响应缓存层，跟你的"云侧前缀缓存（L1）+ 响应缓存（L0）"分层架构正交。
+
+---
+
+## 四、NVIDIA 生态
+
+### 11. NVIDIA Dynamo（原 Triton Dynamo）
+- **GitHub**: https://github.com/ai-dynamo/dynamo
+- **核心能力**: `dynamo-kv-router`，基于 Rust 实现，支持 **KV-aware routing** 和 **standalone indexer**。
+- **关键组件**:
+  - `kv-router`: 基于前缀 hash 的路由决策
+  - `indexer`: 分片 KV 缓存索引，支持 ZMQ 事件接收
+  - `slot-tracker`: 追踪 GPU 显存槽位
+- **与你的设计的对应点**: 它的 `standalone-indexer` + `metrics` 模块，对应你的 Profiler + 预热调度器架构。
+
+---
+
+## 五、学术论文 / 研究（理论基础）
+
+### 12. Preble: Efficient Distributed Prompt Scheduling for LLM Serving
+- **论文**: arXiv:2407.00023
+- **核心思想**: 分布式场景下的前缀感知调度，AIBrix 的 `prefix_cache_preble` 算法即来源于此。
+- **被引用**: Lodestar 等后续路由论文将其作为基线对比 
+
+### 13. KVCache in the Wild: Characterizing and Optimizing KVCache at a Large Cloud Provider
+- **论文**: USENIX ATC 2025
+- **核心思想**: 大规模云厂商场景下的 KV 缓存特征分析与优化，对你的"云厂商前缀缓存机制"设计有直接参考价值。
+
+### 14. Lodestar: An Online-Learning LLM Inference Router
+- **论文**: arXiv:2606.00946
+- **核心思想**: 在线学习的路由器，将缓存命中、延迟、成本作为多目标优化，支持前缀缓存感知。
+
+---
+
+## 六、社区讨论 / 生产实践
+
+### 15. OpenAI Community: Prompt Cache Routing + `prompt_cache_key`
+- **讨论**: OpenAI 社区对 `prompt_cache_key`（替代 `user` 参数）的深度讨论。
+- **关键结论**:
+  - `prompt_cache_key` 用于缓存路由信号，与前 256 tokens 的 hash 共同决定路由到哪个推理服务器
+  - 每前缀建议 ≤15 req/min，高流量时应按 user 维度拆分 `prompt_cache_key` 避免饱和 
+- **与你的设计的对应点**: 直接对应你的 `QuotaCoordinator` 中"每前缀 15 rpm 硬约束"和 OpenAI 适配器的 `prompt_cache_options` 注入逻辑。
+
+### 16. nanobot / LocalAI: vLLM Session Affinity
+- **Issue**: https://github.com/HKUDS/nanobot/issues/1645
+- **核心讨论**: 分布式 vLLM 部署中，同一对话轮次被打到不同 worker 导致前缀缓存失效，需要显式 session-affinity 路由提示。
+- **结论**: 只依赖官方文档支持的模式，不引入未文档化的 Azure `x-session-affinity` 语义。
+
+---
+
+## 总结：这些渠道与你的设计的映射关系
+
+| 你的设计模块 | 最相关的开源项目/论文 | 可借鉴/对标的点 |
+|---|---|---|
+| **有界负载一致哈希 + 溢出迁回** | llm-d (Precise Prefix-Cache Scorer + 负载分数平衡) | EPP 的"缓存亲和分数 + 负载分数"组合决策 |
+| **PrefixProfiler + 预热调度** | llm-d (kv-cache-manager 事件追踪) / LiteLLM 预热实测 | 事件驱动的缓存状态索引；预热 ROI 数据 |
+| **指纹树 + 分层前缀** | Ray Serve (PrefixCacheAffinityRouter) | 字符级前缀树近似，你的 sha256 指纹树更轻量 |
+| **QuotaCoordinator (15 rpm 约束)** | OpenAI Community (`prompt_cache_key` 讨论) | 厂商侧硬约束的社区验证 |
+| **本地 vLLM/SGLang 实例亲和** | SGLang (cache_aware) / AIBrix (prefix_cache) | 前缀 hash 路由实践，但缺负载感知 |
+| **L0 响应缓存协同** | Apache APISIX AI Gateway / LiteLLM / Portkey | 语义缓存、简单缓存的分层 TTL 实践 |
+| **成本归因与预算帽** | LiteLLM (auto-router + prompt caching benchmark) | 预热成本占比的实测基准 |
+
+**建议优先级**：
+1. **llm-d** 和 **AIBrix** 是最值得深入读的，因为它们的架构（K8s 网关 + 前缀缓存路由 + 负载感知）跟你的设计基线几乎同构。
+2. **LiteLLM 的预热实测博客** 可以直接作为你"预热帽按最坏场景测算"决策的论据支撑。
+3. **SGLang 的 cache_aware** 可以作为本地部署阶段的参考实现，但记得补上负载溢出机制。
+
+
+ 确实，这些**精确可配置的厂商常数**是落地最关键的数据。我帮你去搜一下 GitHub 上专门做这件事的仓库，以及各厂商官方的最新口径。  
+  让我再精准搜一下 GitHub 上那些**直接维护厂商参数表**的项目，以及各厂商官方文档里的精确数值。    
+   让我再精准搜一下那些**直接维护厂商参数YAML/JSON**的GitHub仓库，以及Anthropic、Gemini的官方精确数值。    
+    找到了。GitHub 上确实有几个**专门维护厂商参数表**的仓库，而且 2026 年的精确数值已经比 2025 年变化很大（比如 OpenAI 引入了 cache-write 收费、Anthropic 默认 TTL 从 1h 悄悄改回 5min 等）。下面按**数据来源渠道**和**精确参数表**两部分给你。     
+
+---
+
+## 一、GitHub 上直接维护厂商参数的渠道
+
+### 1. RightNow-AI/inference-cost-truth ⭐ 最硬核
+- **地址**: https://github.com/RightNow-AI/inference-cost-truth
+- **权威度**: S 级（GitHub 仓库，874 条验证价格行，每条带 source URL + 检索日期 + 机械证据门）
+- **内容**: 24 个 provider、378 个 GPU 租赁率、395 个吞吐量数据点，**包含 Cached Input 列**
+- **格式**: 结构化表格（Markdown + 可能的数据文件），CC BY 4.0
+- **与你设计的对应点**: 可直接作为 `provider.yaml` 中成本参数的**外部验证源**，特别是 `cached_input` 价格列 
+
+### 2. BerriAI/litellm — `model_prices_and_context_window.json`
+- **地址**: https://github.com/BerriAI/litellm（核心文件在仓库根目录或 `litellm/` 下）
+- **权威度**: S 级（生产级项目，被大量网关依赖）
+- **内容**: 
+  - `cache_creation_input_token_cost`（cache write 价格）
+  - `cache_read_input_token_cost`（cache hit 价格）
+  - `input_cost_per_token` / `output_cost_per_token`
+  - 支持 `_priority` 和 `_above_272k_tokens` 变体定价
+- **关键发现**: 2026-07 已更新 **GPT-5.6 家族的 cache-write 定价**（1.25× base input），这是 OpenAI 新引入的 write surcharge 
+- **与你设计的对应点**: 这个 JSON 就是**现成的厂商参数表**，你的 `provider.yaml` 可以直接引用或同步它的 schema
+
+### 3. vm0-ai/vm0 — 模型目录 + 定价元数据
+- **地址**: https://github.com/vm0-ai/vm0
+- **权威度**: S 级
+- **内容**: 维护 canonical model catalog，包含 provider routing、model picker、定价元数据
+- **关键发现**: 已追踪 **GPT-5.6 预览版** 的精确价格（Sol $5 input / $30 output，Terra $2.5 / $15，Luna $1 / $6），以及 cache-write 新机制 
+
+### 4. OpenRouter 社区（分散在 issues 中）
+- **地址**: https://github.com/getnao/nao/issues/1381 等
+- **内容**: 讨论 `getPromptCacheProvider` 函数如何为不同 provider 注入 `cache_control`，以及 OpenRouter 透传 Anthropic cache 的实际效果（13× 成本差距的 benchmark）
+- **与你设计的对应点**: 验证了你的 **Adapter 层**需要为每个厂商单独处理 breakpoint 注入逻辑 
+
+### 5. 其他网关的 provider 配置（可借鉴 schema）
+- **Portkey-AI/gateway**: MIT 开源，支持多模型路由，但定价数据不如 litellm 完整
+- **ZhuLinsen/daily_stock_analysis**: 展示了高级 YAML 配置中 `LLM_PROMPT_CACHE_TELEMETRY_ENABLED` 等开关的用法 
+
+---
+
+## 二、2026 年 8 月精确厂商参数表（可直接填入 provider.yaml）
+
+下面这张表整合了官方文档 + 社区验证 + GitHub 数据源，**所有数值都标注了来源和验证日期**：
+
+| 参数 | DeepSeek | OpenAI | Anthropic | Gemini | 本地 vLLM/SGLang |
+|------|----------|--------|-----------|--------|------------------|
+| **缓存方式** | 自动，零配置 | 自动 + 显式 `prompt_cache_options` | 手动 `cache_control`（最多 4 个 breakpoint）+ 2026 新增自动模式 | 隐式（2.5+自动）+ 显式 `cached_content` API | GPU 显存 RadixAttention |
+| **最小可缓存前缀** | 未官方公布（实践 ~1,024 tokens） | **1,024 tokens**（所有模型） | **1,024 tokens**（Opus/Sonnet/Fable 5: 512）；**4,096 tokens**（Haiku 4.5） | **2,048 tokens**（2.5 Flash/Pro）；**4,096 tokens**（3.5 Flash / 3.1 Pro） | 1 token 起即有收益 |
+| **Cache Read 折扣** | **98% off**（hit = 2% of base） | **90% off**（GPT-5.x 家族）；老模型 50-75% | **90% off**（flat 0.1× base input） | **90% off**（2.5+）；旧 2.0 75%（已下线） | N/A（无计费） |
+| **Cache Write 成本** | **免费**（无 surcharge） | **免费**（老模型）；**GPT-5.6 起 1.25× base input**（新引入！） | **1.25× base**（5-min TTL）；**2.0× base**（1-hour TTL） | **$0.50/MTok**（3.1 Pro 一次性 write）+ **存储费** | N/A |
+| **存储费** | 无 | 无 | 无 | **$1.00/MTok/hr**（Flash）；**$4.50/MTok/hr**（Pro） | 无 |
+| **TTL / 保留期** | ~5 min 空闲（自动） | 5–10 min 无活动；**GPT-5.5+ 扩展至 24h 默认，无额外费** | 5 min 默认；1h 可选（2× write price）；每次 read 刷新 TTL | 隐式：不用户控制；显式：默认 1h，可配置 | 直到显存驱逐（LRU） |
+| **每前缀速率限制** | 无硬性限制（但建议控制） | **~15 req/min**（官方文档：`prompt_cache_key` 维度） | 无单独前缀限制（但 RPM tier 限制整体） | 无单独前缀限制 | 实例级并发限制 |
+| **RPM 限制（付费 tier）** | **60 RPM**（固定，无 tier） | Tier 1: 500 → Tier 5: **10,000 RPM** | Tier 1: 50 → Tier 4: **4,000 RPM** | **1,000–4,000 RPM**（立即获得） | 取决于 GPU 配置 |
+| **TPM 限制（旗舰模型）** | **1,000,000 TPM** | Tier 5: **5,000,000 TPM** | Opus 4.6: **400,000 TPM** | **4,000,000 TPM** | 取决于吞吐 |
+| **cache_read 是否计速率限额** | 是 | 是 | **否**（cache_read_input_tokens 不计入 ITPM，免费乘数！） | 是 | N/A |
+| **命中折扣模型** | 自动按前缀匹配 | 自动前缀哈希（前 ~256 tokens 决定引擎路由） | 精确前缀到 breakpoint | 隐式前缀匹配 / 显式 ID 引用 | 实例内 Radix 树匹配 |
+| **协议注入要求** | 无需注入 | 可选 `prompt_cache_options` | 必须注入 `cache_control` | 显式模式需创建 cache 对象 | 无需注入 |
+
+> **价格明细（$/1M tokens，2026-08 验证）**：
+> - **DeepSeek v4-flash**: miss $0.14 / hit $0.0028 / output $0.28 
+> - **DeepSeek v4-pro**: miss $0.435 / hit $0.003625 / output $0.87 
+> - **OpenAI GPT-5.4**: input $2.50 / cached $0.25 / output $10.00 
+> - **OpenAI GPT-5.6 Sol**: input $5.00 / cache-write $6.25 / cached $0.50 / output $30.00 
+> - **Anthropic Sonnet 4.6**: input $3.00 / 5min-write $3.75 / 1h-write $6.00 / read $0.30 / output $15.00 
+> - **Anthropic Opus 4.8**: input $5.00 / 5min-write $6.25 / read $0.50 / output $25.00 
+> - **Gemini 3.1 Pro**: input $2.00 / read $0.20 / write $0.50 / storage $4.50/hr 
+> - **Gemini 3.5 Flash**: input $1.50 / read $0.15 / storage $1.00/hr 
+
+---
+
+## 三、几个与你设计基线直接相关的关键更新
+
+### 1. OpenAI GPT-5.6 引入了 Cache-Write 收费（重大变化）
+以前 OpenAI 是"免费写入"，但 2026-07 发布的 GPT-5.6 家族开始收取 **1.25× base input** 的 cache-write 费用 。这意味着你的 **预热成本模型**需要区分：
+- **老模型**（GPT-5.4 及以前）：预热 write 免费，迟到只损失命中率
+- **新模型**（GPT-5.6+）：预热 write 本身就有成本，迟到 = 全价 prefill + 额外 write 费
+
+### 2. Anthropic 默认 TTL 在 2026-03 悄悄从 1h 改回 5min
+社区有开发者分析了 119,866 次 API 调用，发现 Anthropic 在 2026-03-06 无公告地将默认 TTL 从 1 小时改为 5 分钟，导致部分团队成本浪费 17.1% 。这直接支撑了你设计中 **"TTL×0.45 提前预热"** 和 **"按最坏场景全价测算"** 的保守策略。
+
+### 3. DeepSeek 的 50× 折扣是真实的，但最小前缀未官方公布
+DeepSeek v4-flash 的 hit 价格 $0.0028/M 对比 miss $0.14/M 确实是 **50× 差距** ，但官方文档**没有明确写出最小可缓存前缀长度**。你的基线中写的 "~1024 tokens（64-token 单元）" 是社区推断值，建议配置中留注释说明"待官方确认"。
+
+### 4. Gemini 显式缓存的存储费是持续成本
+Gemini 3.1 Pro 的 $4.50/MTok/hr 存储费意味着：一个 1M token 的缓存挂 24 小时 = **$108 纯存储成本**，不管读没读 。这解释了为什么你的设计基线里写"长上下文才值得做"——短前缀的存储费会吃掉所有折扣。
+
+---
+
+## 四、建议的 `provider.yaml` 补全方案
+
+基于以上 GitHub 数据源，你的 `provider.yaml` §14 可以改成这样（示例）：
+
+```yaml
+providers:
+  deepseek:
+    caching:
+      mode: automatic          # 零配置
+      min_prefix_tokens: 1024  # 社区推断，待官方确认
+      ttl_seconds: 300         # ~5min 空闲过期
+      write_cost_multiplier: 1.0   # 免费写入
+      read_cost_multiplier: 0.02   # 98% off
+      storage_cost_per_mtok_hour: 0
+    rate_limits:
+      rpm: 60                  # 固定，无 tier
+      tpm: 1000000
+    pricing:
+      v4_flash:
+        input_per_mtok: 0.14
+        cached_input_per_mtok: 0.0028
+        output_per_mtok: 0.28
+
+  openai:
+    caching:
+      mode: automatic_with_breakpoint  # 可选 prompt_cache_options
+      min_prefix_tokens: 1024
+      ttl_seconds: 600         # 5-10min 基础；gpt-5.5+ 扩展 86400
+      write_cost_multiplier: 1.25  # GPT-5.6+ 新引入！老模型用 1.0
+      read_cost_multiplier: 0.10   # 90% off (GPT-5.x)
+      storage_cost_per_mtok_hour: 0
+      per_prefix_rpm_limit: 15     # 官方硬约束
+    rate_limits:
+      tiered: true
+      tiers:
+        - {spend: 5, rpm: 500, tpm: 30000}
+        - {spend: 50, rpm: 5000, tpm: 450000}
+        - {spend: 1000, rpm: 10000, tpm: 5000000}
+
+  anthropic:
+    caching:
+      mode: explicit_breakpoint   # cache_control，最多 4 个
+      min_prefix_tokens: 1024     # Opus/Sonnet；Haiku 4096
+      ttl_seconds: 300            # 5min 默认；3600 可选（2× write）
+      write_cost_multiplier: 1.25 # 5min tier
+      write_cost_multiplier_1h: 2.0
+      read_cost_multiplier: 0.10  # 90% off
+      storage_cost_per_mtok_hour: 0
+      cache_read_exempt_from_tpm: true  # 关键！不计入 ITPM
+    rate_limits:
+      tiered: true
+      tiers:
+        - {spend: 5, rpm: 50, tpm: 40000}
+        - {spend: 400, rpm: 4000, tpm: 400000}
+
+  gemini:
+    caching:
+      mode: implicit_and_explicit
+      min_prefix_tokens: 2048     # 2.5 系列；3.x 为 4096
+      ttl_seconds: null           # 隐式不用户控制；显式默认 3600
+      write_cost_per_mtok: 0.50   # 显式一次性
+      read_cost_multiplier: 0.10  # 90% off
+      storage_cost_per_mtok_hour: 4.50  # Pro；Flash 1.00
+    rate_limits:
+      rpm: 4000
+      tpm: 4000000
+```
+
+**数据来源追踪**: 建议在你的代码注释里直接引用：
+- 价格数据: `litellm/model_prices_and_context_window.json` (BerriAI/litellm)
+- 验证基准: `RightNow-AI/inference-cost-truth`
+- OpenAI 15 rpm: `Microsoft Learn - Prompt caching with Azure OpenAI` 
+- Anthropic TTL 变更: `kspl.tech` 社区分析 119,866 次调用 

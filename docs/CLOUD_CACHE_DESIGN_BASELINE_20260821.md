@@ -5,6 +5,12 @@
 >
 > v1.1（2026-08-21 评审修正，5 项）：命中归属推断机制 / 状态存储进程内先行 /
 > 80% 目标分阶段 / P3 折叠缓存断裂预算 / 预热帽按全价最坏场景。新增 §14 配置形态。
+>
+> v1.2（2026-08-21 数据补充，来自用户调研 `docs/业务.txt`）：§2.2 精确
+> 参数表（OpenAI GPT-5.6+ write 1.25× / Anthropic TTL 回退 5min / Gemini
+> 存储费 / DeepSeek min 待官方确认）；§5.2 LiteLLM 预热 ROI（聊天 +0.10%
+> 不值、agentic 长会话 -0.9% 值）；§14 provider 级 caching 参数；
+> §15 开源项目对标（llm-d 87.4% / SGLang +1.9× / Ray TTFT -60%）。
 
 ---
 
@@ -30,6 +36,37 @@
 | **本地 vLLM/SGLang** | GPU 上 prefix/radix KV，节点内存 | 1 token 起即有收益 | 直到显存驱逐 | **实例级**亲和，比云更严格 | 实例级 sticky；若有外部 KV 池（LMCache/Mooncake）可放宽 | 同前缀轮询到不同 Pod |
 
 **统一规律**：自动或半自动 / 前缀精确 / 命中打折。云侧缓存与网关响应缓存（L0）正交：一个省 prefill 和钱，一个省整次 RTT。
+
+### 2.2 精确参数表（2026-08，评审补充）
+
+> 数据来源：`BerriAI/litellm → model_prices_and_context_window.json`、
+> `RightNow-AI/inference-cost-truth`（874 条验证价格行）、厂商官方文档、
+> 社区实测（Anthropic TTL 变更 = 119,866 次调用分析）。**待官方确认项**
+> 明确标注，配置里留注释。
+
+| 参数 | DeepSeek | OpenAI | Anthropic | Gemini |
+|------|----------|--------|-----------|--------|
+| 缓存方式 | 自动零配置 | 自动 + 显式 `prompt_cache_options` | 手动 `cache_control`（≤4 breakpoint） | 隐式（2.5+ 自动）+ 显式 cached content |
+| 最小可缓存前缀 | 官方未公布（实践 ~1,024，**待官方确认**） | **1,024**（所有模型） | 1,024（Opus/Sonnet/Fable 5: 512；Haiku 4.5: 4,096） | 2,048（2.5 Flash/Pro）；4,096（3.x） |
+| Cache Read 折扣 | **98% off**（hit=2% base，50×） | 90% off（GPT-5.x）；老模型 50–75% | 90% off（flat 0.1×） | 90% off（2.5+） |
+| Cache Write 成本 | 免费 | **免费（老模型）；GPT-5.6+ 1.25× base（新！）** | 5m: 1.25×；1h: 2.0× | 显式一次性（3.1 Pro $0.50/MTok）+ 存储费 |
+| 存储费 | 无 | 无 | 无 | Flash $1.00/MTok/hr；Pro $4.50/MTok/hr |
+| TTL | ~5min 空闲 | 5–10min；GPT-5.5+ 扩展 24h 默认 | **5min 默认（2026-03 无公告从 1h 改回 5min，社区实测成本浪费 17.1%）**；1h 可选（2× write） | 隐式 1h；显式默认 1h 可配 |
+| 每前缀速率 | 无硬限制 | **~15 req/min** | 无单独限制（RPM tier 整体） | 无单独限制 |
+| cache_read 是否计 TPM | 是 | 是 | **否（不计入 ITPM，免费乘数）** | 是 |
+
+**对本设计的直接影响**
+
+1. **预热成本模型分模型代际**：OpenAI 老模型写免费、迟到只丢命中；GPT-5.6+
+   预热 write 本身 1.25× 计费、迟到 = 全价 prefill + 额外 write —— 预热触发
+   与帽必须按「该 provider 的 write 是否收费」区分，Write 收费模型只在
+   高价值 agentic 前缀上预热。
+2. **Anthropic TTL 回退到 5min**：直接支撑 TTL×0.45 提前预热与「按最坏
+   场景测算」的保守策略；TTL 参数必须 per-provider 维护（禁止写死）。
+3. **Gemini 存储费是持续成本**：1M token 挂 24h = $108（Pro）纯存储费，
+   短前缀的折扣全被存储费吃掉 —— 维持「长上下文才值得做」。
+4. **Anthropic cache_read 不计 ITPM**：QuotaCoordinator 对 Anthropic 的
+   预热配额评估要单独处理（命中 read 不占 TPM 预算）。
 
 ---
 
@@ -125,6 +162,14 @@ P4 本轮输入     user 本轮 + 动态时间/request_id         不可缓存�
 - **禁止**重排、改文本、剥时间戳转发。
 
 ### 5.2 心跳预热（Heartbeat Prewarm）
+
+**预热 ROI 实测（LiteLLM 2026-07，评审补充）**：预热不是银弹——
+- 一般聊天场景：仅 ~4% 的 miss 可通过后台预热避免，且预热反而让总成本
+  **+0.10%**（不值得）。
+- **agentic 长会话（~190k tokens 前缀）：预热可省 ~0.9% 成本**（值得）。
+- 结论：预热触发阈值（`trigger_hit_tokens`）必须设高，只对长前缀/高频
+  前缀开放；短聊天前缀一律不预热。这是 §8「分阶段目标」与 §2.2 的
+  直接论据。
 
 **触发条件**（同时满足）：
 - 热度：近 15min 内 `req_count ≥ N` 或 `hit_tokens 累计 ≥ H`
@@ -400,6 +445,80 @@ prefix:
 
 > 所有值走 provider.yaml + 环境变量覆盖，热更新随 watcher 生效；
 > 默认全关（`enabled: false`），阶段 B 按模块逐个打开并消融。
+
+**provider 级 caching 参数**（挂在各 provider 下，来源 §2.2 精确表；
+数据同步参考 `litellm/model_prices_and_context_window.json` +
+`RightNow-AI/inference-cost-truth`，入库时带 source/检索日期）：
+
+```yaml
+providers:
+  deepseek:
+    caching:
+      mode: automatic              # 零配置
+      min_prefix_tokens: 1024      # 社区推断, 待官方确认（注释标注）
+      ttl_seconds: 300             # ~5min 空闲过期
+      write_cost_multiplier: 1.0   # 免费写入
+      read_cost_multiplier: 0.02   # 98% off（50×）
+      storage_cost_per_mtok_hour: 0
+      per_prefix_rpm_limit: 0      # 无硬限制
+    rate_limits: {rpm: 60, tpm: 1000000}
+  openai:
+    caching:
+      mode: automatic_with_breakpoint
+      min_prefix_tokens: 1024
+      ttl_seconds: 600             # 基础 5-10min; gpt-5.5+ 86400（模型级覆盖）
+      write_cost_multiplier: 1.25  # GPT-5.6+ 收费; 老模型 1.0（模型级覆盖）
+      read_cost_multiplier: 0.10   # 90% off
+      storage_cost_per_mtok_hour: 0
+      per_prefix_rpm_limit: 15     # 官方硬约束 → QuotaCoordinator
+  anthropic:
+    caching:
+      mode: explicit_breakpoint    # cache_control, ≤4
+      min_prefix_tokens: 1024      # Haiku 4.5: 4096
+      ttl_seconds: 300             # 5min 默认（2026-03 起）; 3600 可选 2× write
+      write_cost_multiplier: 1.25
+      write_cost_multiplier_1h: 2.0
+      read_cost_multiplier: 0.10
+      cache_read_exempt_from_tpm: true  # 命中 read 不计 ITPM
+  gemini:
+    caching:
+      mode: implicit_and_explicit
+      min_prefix_tokens: 2048      # 2.5 系列; 3.x 4096
+      ttl_seconds: 3600
+      write_cost_per_mtok: 0.50    # 显式一次性（3.1 Pro）
+      read_cost_multiplier: 0.10
+      storage_cost_per_mtok_hour: 4.50  # Pro; Flash 1.00 —— 持续成本
+```
+
+---
+
+## 15. 开源项目对标（2026-08，评审补充）
+
+> 来源：`业务.txt`（用户提供调研，2026-08-21）。用于验证设计方向 + 吸收
+> 生产数据作为验收参照；**不是照抄实现**——多数项目面向本地 vLLM 池，
+> 我们是云厂商网关，架构不同、机制同构。
+
+| 项目 | 机制 | 生产数据 | 与我们的对应 |
+|------|------|----------|--------------|
+| **llm-d**（IBM/Google/Red Hat，K8s Gateway API + EPP） | KV-Cache-Aware Routing：追踪 vLLM Pod 缓存事件（BlockStored/BlockRemoved），Precise Prefix-Cache Scorer = 缓存亲和分 × 负载分 | **87.4% 命中率** | 「缓存亲和 × 负载」组合决策 = 我们的「亲和层 + 节点层」；事件回写 = Profiler |
+| **AIBrix**（vLLM 官方生态） | `prefix_cache` / `prefix_cache_preble`（Preble 论文）前缀树路由 | — | 前缀亲和有、缺有界负载/预热——我们更完整；`MetadataStore` = 我们的 `PrefixStore` |
+| **SGLang** `cache_aware` | 前缀 hash 路由到同一 worker（纯 hash，无负载感知） | **吞吐 +1.9×，缓存命中 +3.8×** | 印证「前缀亲和」价值；它缺的过载溢出正是我们补的 |
+| **Ray Serve** `PrefixCacheAffinityRouter` | 字符级前缀树近似 + Power-of-Two-Choices 负载 fallback | **TTFT -60%，端到端吞吐 +40%** | 前缀树近似 = 我们的指纹树（我们 sha256 更轻）；负载 fallback = 有界负载 |
+| **vLLM** `--enable-prefix-caching` | RadixAttention，**本身不做路由** | — | 印证：本地池必须有上层 sticky/亲和，否则分布式前缀缓存失效 |
+| **NVIDIA Dynamo** `dynamo-kv-router` | Rust，KV-aware routing + standalone indexer + slot-tracker | — | indexer + metrics = Profiler + 预热调度架构 |
+| **LiteLLM** Auto-Routing + Prompt Caching | 100+ 厂商，auto-router 不破坏缓存（1h TTL 下 **99.3% 切回仍热**）；预热 ROI 实测 | 聊天预热 **+0.10% 成本**；agentic 长会话 **-0.9%** | 直接支撑 §5.2：预热只做高价值前缀 |
+| **Portkey** / **APISIX AI** / **Kong** | 语义缓存 / proxy-cache | APISIX 教程「成本 -75%」 | 属于 L0 响应缓存层，与我们正交 |
+
+**优先精读**：llm-d（架构同构度最高）→ AIBrix（prefix_cache_preble）→
+SGLang（cache_aware，本地阶段参考）。学术参照：Preble（前缀感知调度）、
+Lodestar（在线学习路由器，缓存×延迟×成本多目标）、KVCache in the Wild
+（云厂商 KV 缓存特征）。
+
+**关键校正**：LiteLLM 数据说明「Auto-routing 不破坏缓存」（1h TTL 下
+99.3% 仍热）——即**云侧缓存对短时路由抖动的容忍度高于预期**；这让我们
+的「有界负载溢出」不必过度保守（溢出窗口内 TTL 内迁回即可，命中损失
+小于直觉）。但 DeepSeek/Anthropic TTL 仅 5min，容忍窗口小，溢出仍要
+快速迁回。
 
 ---
 
