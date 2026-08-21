@@ -62,6 +62,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"routing_rules":     s.routingRules,
 		"prefix_tracked":    s.prefixProfiler.Size(),
 		"coalescer_pending": s.coalescer.Pending(),
+		"affinity_enabled":  s.affinity != nil,
 		"problems_detected": problemCount,
 		"uptime_seconds":    s.metrics.Uptime(),
 		"go_version":        runtime.Version(),

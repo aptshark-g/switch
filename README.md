@@ -34,6 +34,7 @@ Groq / OpenRouter / LM Studio / Ollama）, 一套 OpenAI 兼容接口同时对�
 | 🛡️ **三层保护** | 信号量 → 速率限制 → 滑动窗口断路器 |
 | ⚡ **自适应并发** | Gradient2 算法, 根据延迟梯度动态调整 |
 | 🎯 **智能路由** | 意图/复杂度规则层（X-Intent + X-Complexity → routing.rules, cortiq-gateway/leyline 模式）+ 池内加权随机（priority 分层 × weight × health × latency × cost, 2026-08-21 实测） |
+| 🧭 **前缀亲和路由** | B-2 一致哈希亲和（FP+tenant → provider）+ 过载溢出 sticky（DM_GATEWAY_AFFINITY=1 启用, 2026-08-22） |
 | 🔗 **请求合并** | 同 cacheKey 并发请求 → 1 次上游调用（2026-08-21 接线） |
 | 📊 **诊断端点** | /v1/diagnostics — 每个 Provider 的 key/base_url/circuit 状态 |
 | 🔄 **热重载** | 5s 轮询 provider.yaml + Admin API |

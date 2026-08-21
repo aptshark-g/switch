@@ -86,6 +86,13 @@
 - DoD：`hit_tokens_by_layer` 指标；`miss_reason=routed_away` 基线值。
 
 ### 2.2 B-2 有界负载亲和路由
+
+> ✅ 2026-08-22 已实现（prefix/affinity.go + server 接线）: 加权虚拟节点
+> 一致哈希环（sha256 截断, FNV 对短串雪崩差已修）+ 过载溢出（inflight >
+> c×weight）+ 溢出 sticky（TTL 防抖）+ 冷启动直接哈希主节点;
+> DM_GATEWAY_AFFINITY=1 启用; 8+1 单测; /v1/stats 出 affinity 快照。
+> 待办: 完整 DrainBack 状态机（当前溢出 TTL 自然迁回, 无分阶段流量）。
+
 - `prefix/affinity.go`：加权虚拟节点一致哈希 + 过载溢出 + 状态机
   `Bound→Overflow→DrainBack→Bound` + 振荡抑制。
 - 冷启动直接走哈希主节点；转发亲和只认 `fp0123`。

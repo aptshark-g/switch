@@ -7,8 +7,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aptshark/gateway/config"
+	"github.com/aptshark/gateway/prefix"
 	"github.com/aptshark/gateway/provider"
 )
 
@@ -271,4 +273,47 @@ func TestMatchList(t *testing.T) {
 			t.Fatalf("matchList(%q, %q) = %v, want %v", c.rule, c.req, got, c.want)
 		}
 	}
+}
+
+func TestRouteRequestAffinity(t *testing.T) {
+	s, _ := newRoutingServer(t, []provider.ProviderConfig{
+		pcfg("a", 1, 1),
+		pcfg("b", 1, 1),
+	})
+	s.affinity = prefix.NewAffinityRouter(nil, 1.25, time.Second)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer tenant-1")
+	messages := &provider.GenerateRequest{
+		Messages: []provider.Message{
+			{Role: "system", Content: "stable system prompt"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	d1 := s.routeRequest(req, messages)
+	if !d1.affinityPicked || !strings.HasPrefix(d1.by, "affinity:") || d1.provider == "" {
+		t.Fatalf("decision = %+v, want affinity pick", d1)
+	}
+	tree := prefix.FingerprintRequest(messages)
+	t.Logf("fp=%s tenant=tenant-1 first=%s", tree.FP, d1.provider)
+	// 同 (FP, tenant) 稳定
+	for i := 0; i < 10; i++ {
+		d := s.routeRequest(req, messages)
+		if d.provider != d1.provider {
+			t.Fatalf("provider %q then %q, want stable affinity", d1.provider, d.provider)
+		}
+		s.affinity.Dec(d.provider) // 模拟请求完成, 释放负载
+	}
+	// 不同 tenant → key 不同, 允许不同 provider（只需确定性与计数一致）
+	req2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req2.Header.Set("Authorization", "Bearer tenant-2")
+	d2 := s.routeRequest(req2, messages)
+	if d2.provider == "" || !d2.affinityPicked {
+		t.Fatalf("tenant-2 decision = %+v, want affinity pick", d2)
+	}
+	if s.affinity.Inflight(d1.provider)+s.affinity.Inflight(d2.provider) < 1 {
+		t.Fatal("affinity inflight should be > 0 after picks")
+	}
+	// 释放负载
+	s.affinity.Dec(d1.provider)
+	s.affinity.Dec(d2.provider)
 }

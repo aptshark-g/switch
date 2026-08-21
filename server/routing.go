@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/aptshark/gateway/config"
 	"github.com/aptshark/gateway/observability"
+	"github.com/aptshark/gateway/prefix"
 	"github.com/aptshark/gateway/provider"
 )
 
@@ -34,6 +36,7 @@ type routeDecision struct {
 	by         string // "rule:<name>" | "weighted" | "none"
 	intent     string
 	complexity string
+	affinityPicked bool // B-2: 命中亲和, 请求完成需 Dec 负载计数
 }
 
 // SetRoutingRules 热更新路由规则（watcher 重载 provider.yaml 后调用）。
@@ -52,11 +55,71 @@ func (s *Server) routeRequest(r *http.Request, req *provider.GenerateRequest) ro
 		d.intent, d.complexity = intent, complexity
 		return d
 	}
-	return routeDecision{
-		provider:   s.selectFromPool(),
-		by:         "weighted",
-		intent:     intent,
-		complexity: complexity,
+	d := routeDecision{by: "weighted", intent: intent, complexity: complexity}
+	if s.affinity != nil {
+		if p, reason := s.affinityPick(r, req); p != "" {
+			d.provider = p
+			d.by = "affinity:" + reason
+			d.affinityPicked = true
+		}
+	}
+	if d.provider == "" {
+		d.provider = s.selectFromPool()
+	}
+	return d
+}
+
+// affinityPick B-2: 一致哈希亲和（key = FP + tenant）, 过载溢出走 sticky。
+func (s *Server) affinityPick(r *http.Request, req *provider.GenerateRequest) (string, string) {
+	s.rebuildAffinityRing()
+	tenant := "anon"
+	if h := r.Header.Get("Authorization"); len(h) > 7 {
+		tenant = h[7:]
+	}
+	tree := prefix.FingerprintRequest(req)
+	key := tree.FP + ":" + tenant
+	p, reason := s.affinity.Decide(key, s.affinityHealthy)
+	if p != "" && reason == "overflow" {
+		s.affinity.RecordOverflow(key, p)
+	}
+	if p != "" {
+		s.affinity.Inc(p)
+	}
+	return p, reason
+}
+
+func (s *Server) affinityHealthy(name string) bool {
+	snap, ok := s.providerSnapshot(name)
+	return ok && snap.Active && snap.KeyConfigured &&
+		snap.Circuit != provider.CircuitOpen
+}
+
+// rebuildAffinityRing 环按当前 eligible 集合重建（签名变化才重建）。
+func (s *Server) rebuildAffinityRing() {
+	eligible := s.poolEligible()
+	var sig strings.Builder
+	nodes := make([]prefix.AffinityNode, 0, len(eligible))
+	names := make([]string, 0, len(eligible))
+	wmap := make(map[string]int, len(eligible))
+	for _, p := range eligible {
+		w := 1
+		if cfg, ok := s.manager.Config(p.Name); ok && cfg.Weight > 0 {
+			w = cfg.Weight
+		}
+		wmap[p.Name] = w
+		names = append(names, p.Name)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintf(&sig, "%s:%d,", n, wmap[n])
+		nodes = append(nodes, prefix.AffinityNode{Name: n, Weight: wmap[n]})
+	}
+	s.affinityMu.Lock()
+	defer s.affinityMu.Unlock()
+	sigStr := sig.String()
+	if sigStr != s.affinitySig {
+		s.affinitySig = sigStr
+		s.affinity.SetRing(nodes)
 	}
 }
 

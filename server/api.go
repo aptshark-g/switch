@@ -92,6 +92,11 @@ type Server struct {
 	// SLO burn-rate 告警（2026-08-21 接线）: 此前孤儿, 现由
 	// MetricsMiddleware 喂成功/失败, 超阈值触发 onAlert。
 	slo *observability.SLOMonitor
+	// B-2 有界负载亲和路由（2026-08-22）: 池内加权回落的"加权随机"
+	// 升级为 一致哈希亲和(FP+tenant) + 过载溢出。DM_GATEWAY_AFFINITY=1 启用。
+	affinity *prefix.AffinityRouter
+	affinitySig string // 环签名（eligible 集合变化才重建）
+	affinityMu  sync.Mutex
 }
 
 func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watcher, authCfg config.AuthConfig, store *persistence.Store) *Server {
@@ -129,6 +134,7 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 		coalescer:  cache.NewCoalescer(),
 		prefixProfiler: prefix.NewProfiler(),
 		slo: observability.NewSLOMonitor(observability.DefaultSLOConfig()),
+		affinity: newAffinityFromEnv(),
 	}
 	s.slo.OnAlert(func(a observability.SLOAlert) {
 		log.Printf("SLO ALERT [%s] burn_rate=%.2f error_rate=%.3f budget_remaining=%.3f",
@@ -136,6 +142,28 @@ func NewWithWatcher(manager *provider.Manager, addr string, watcher *config.Watc
 	})
 	s.routes()
 	return s
+}
+
+// newAffinityFromEnv B-2 亲和路由（默认关闭, DM_GATEWAY_AFFINITY=1 启用）。
+func newAffinityFromEnv() *prefix.AffinityRouter {
+	if os.Getenv("DM_GATEWAY_AFFINITY") != "1" {
+		return nil
+	}
+	overload := 1.25
+	if v := os.Getenv("DM_GATEWAY_AFFINITY_OVERLOAD"); v != "" {
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil && f > 0 {
+			overload = f
+		}
+	}
+	ttl := 60 * time.Second
+	if v := os.Getenv("DM_GATEWAY_AFFINITY_OVERFLOW_TTL"); v != "" {
+		var sec int
+		if _, err := fmt.Sscanf(v, "%d", &sec); err == nil && sec > 0 {
+			ttl = time.Duration(sec) * time.Second
+		}
+	}
+	return prefix.NewAffinityRouter(nil, overload, ttl)
 }
 
 // recordUsage 计费接线: usage → CostTracker（按 auth key 聚合）。
@@ -330,6 +358,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"alert_level":      snap.Level.String(),
 		}
 	}
+	if s.affinity != nil {
+		out["affinity"] = s.affinity.Snapshot()
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -407,6 +438,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	providerName := r.URL.Query().Get("provider")
 	if providerName == "" {
 		decision := s.routeRequest(r, &req)
+		if decision.affinityPicked {
+			// B-2: 亲和选中后记负载, 请求完成时释放（含流式/合并等待路径）。
+			defer func() { s.affinity.Dec(providerName) }()
+		}
 		providerName = decision.provider
 		if providerName == "" {
 			providerName = s.getRoutingProvider()
